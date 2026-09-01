@@ -1,0 +1,8 @@
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+.DS_Store
+Vendor/SwiftTerm/.git/
+Vendor/SwiftTerm/.build/
+Vendor/SwiftTerm/.swiftpm/
