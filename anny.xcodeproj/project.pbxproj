@@ -17,6 +17,7 @@
 		A10000000000000000000028 /* TerminalService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* TerminalService.swift */; };
 		A1000000000000000000002A /* SSHTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000C /* SSHTerminalView.swift */; };
 		A1000000000000000000002B /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000D /* Theme.swift */; };
+		A1000000000000000000002C /* SSHAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000E /* SSHAuth.swift */; };
 		A10000000000000000000029 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* Assets.xcassets */; };
 		A10000000000000000000032 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000031 /* SwiftTerm */; };
 /* End PBXBuildFile section */
@@ -32,6 +33,7 @@
 		A10000000000000000000008 /* TerminalService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalService.swift; sourceTree = "<group>"; };
 		A1000000000000000000000C /* SSHTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalView.swift; sourceTree = "<group>"; };
 		A1000000000000000000000D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		A1000000000000000000000E /* SSHAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHAuth.swift; sourceTree = "<group>"; };
 		A10000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000000000000000000000A /* anny.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = anny.entitlements; sourceTree = "<group>"; };
 		A1000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -79,6 +81,7 @@
 				A10000000000000000000008 /* TerminalService.swift */,
 				A1000000000000000000000C /* SSHTerminalView.swift */,
 				A1000000000000000000000D /* Theme.swift */,
+				A1000000000000000000000E /* SSHAuth.swift */,
 				A1000000000000000000000B /* Assets.xcassets */,
 				A10000000000000000000009 /* Info.plist */,
 				A1000000000000000000000A /* anny.entitlements */,
@@ -172,6 +175,7 @@
 				A10000000000000000000028 /* TerminalService.swift in Sources */,
 				A1000000000000000000002A /* SSHTerminalView.swift in Sources */,
 				A1000000000000000000002B /* Theme.swift in Sources */,
+				A1000000000000000000002C /* SSHAuth.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

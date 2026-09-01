@@ -23,7 +23,7 @@ struct WatchedHost: Identifiable, Hashable, Codable {
 
     var sshTarget: String { "\(user)@\(hostname)" }
 
-    /// 有备注时列表/标题用备注，否则用主机名。
+    /// 名单只显示备注；没有备注时只显示主机名（user@ 后面那一段）。
     var displayName: String {
         let n = note.trimmingCharacters(in: .whitespacesAndNewlines)
         return n.isEmpty ? hostname : n
@@ -56,6 +56,10 @@ struct HostMetrics: Hashable {
     var memTotal: Int64?
     var memAvailable: Int64?
     var disks: [DiskRow]
+    var osPretty: String? = nil
+    var osName: String? = nil
+    var osVersion: String? = nil
+    var kernel: String? = nil
     var fetchedAt: Date
     var error: String?
 

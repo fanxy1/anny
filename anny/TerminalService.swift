@@ -4,19 +4,22 @@ enum TerminalService {
     static let sshExecutable = "/usr/bin/ssh"
 
     static func sshArguments(_ host: WatchedHost) -> [String] {
-        [
+        var args = [
             "-tt",
             "-p", "\(host.port)",
-            "-o", "StrictHostKeyChecking=accept-new",
+        ]
+        args += SSHAuth.sshFlags(hasPassword: HostSecretStore.hasPassword(for: host.id))
+        args += [
             "-o", "UpdateHostKeys=yes",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
             host.sshTarget,
         ]
+        return args
     }
 
     /// `KEY=VALUE` 列表，给 PTY 里的 ssh 用。
-    static func processEnvironment() -> [String] {
+    static func processEnvironment(hostID: UUID) -> [String] {
         var env = ProcessInfo.processInfo.environment
         let extraPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         if let path = env["PATH"], !path.isEmpty {
@@ -37,7 +40,7 @@ enum TerminalService {
         if env["LANG"] == nil || env["LANG"]?.isEmpty == true {
             env["LANG"] = "zh_CN.UTF-8"
         }
-        return env.map { "\($0.key)=\($0.value)" }
+        return SSHAuth.environmentPairs(hostID: hostID, base: env)
     }
 
     private static func launchctlValue(_ key: String) -> String? {

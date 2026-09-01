@@ -14,19 +14,29 @@ enum SSHService {
         grep '^cpu ' /proc/stat
         echo '===DF==='
         df -B1 -P -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null
+        echo '===OS==='
+        if [ -r /etc/os-release ]; then
+          grep -E '^(NAME|PRETTY_NAME|VERSION|VERSION_ID|ID)=' /etc/os-release
+        elif [ -r /etc/redhat-release ]; then
+          printf 'PRETTY_NAME=%s\\n' "$(cat /etc/redhat-release)"
+        fi
+        echo '===UNAME==='
+        uname -srm
         """
+
+        let hasPassword = HostSecretStore.hasPassword(for: host.id)
+        var arguments = [
+            "-o", "ConnectTimeout=8",
+            "-p", "\(host.port)",
+        ]
+        arguments += SSHAuth.sshFlags(hasPassword: hasPassword)
+        arguments += [host.sshTarget, script]
 
         let ssh = "/usr/bin/ssh"
         let result = try ProcessRun.run(
             ssh,
-            arguments: [
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=8",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", "\(host.port)",
-                host.sshTarget,
-                script,
-            ],
+            arguments: arguments,
+            environment: SSHAuth.processEnvironment(hostID: host.id),
             timeout: 18
         )
 
@@ -51,6 +61,11 @@ enum SSHService {
         var cpu1: [Int64] = []
         var cpu2: [Int64] = []
         var disks: [DiskRow] = []
+        var osPretty: String?
+        var osName: String?
+        var osVersion: String?
+        var osVersionId: String?
+        var kernel: String?
         var section = ""
 
         for line in raw.split(whereSeparator: \.isNewline).map(String.init) {
@@ -87,6 +102,21 @@ enum SSHService {
                         mount: cols[5]
                     )
                 )
+            case "===OS===":
+                guard let (key, value) = osReleaseField(line) else { break }
+                switch key {
+                case "PRETTY_NAME": osPretty = value
+                case "NAME": osName = value
+                case "VERSION": osVersion = value
+                case "VERSION_ID": osVersionId = value
+                case "ID":
+                    if osName == nil { osName = value }
+                default:
+                    break
+                }
+            case "===UNAME===":
+                let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { kernel = t }
             default:
                 break
             }
@@ -98,9 +128,24 @@ enum SSHService {
             memTotal: memTotal,
             memAvailable: memAvail,
             disks: disks,
+            osPretty: osPretty,
+            osName: osName,
+            osVersion: osVersion ?? osVersionId,
+            kernel: kernel,
             fetchedAt: Date(),
             error: nil
         )
+    }
+
+    private static func osReleaseField(_ line: String) -> (String, String)? {
+        guard let eq = line.firstIndex(of: "=") else { return nil }
+        let key = String(line[..<eq])
+        var value = String(line[line.index(after: eq)...])
+        if value.count >= 2, value.first == "\"", value.last == "\"" {
+            value = String(value.dropFirst().dropLast())
+        }
+        value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : (key, value)
     }
 
     private static func cpuFields(_ line: String) -> [Int64] {

@@ -95,7 +95,7 @@ struct SSHTerminalView: NSViewRepresentable {
             terminal.startProcess(
                 executable: TerminalService.sshExecutable,
                 args: TerminalService.sshArguments(host),
-                environment: TerminalService.processEnvironment(),
+                environment: TerminalService.processEnvironment(hostID: host.id),
                 execName: "ssh",
                 currentDirectory: NSHomeDirectory()
             )

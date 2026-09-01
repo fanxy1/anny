@@ -5,12 +5,13 @@ enum ProcessRun {
     static func run(
         _ launchPath: String,
         arguments: [String],
+        environment: [String: String]? = nil,
         timeout: TimeInterval = 20
     ) throws -> (stdout: String, stderr: String, status: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
-        process.environment = ProcessInfo.processInfo.environment
+        process.environment = environment ?? ProcessInfo.processInfo.environment
 
         let out = Pipe()
         let err = Pipe()
