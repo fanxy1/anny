@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum SessionState {
@@ -25,6 +26,12 @@ enum AnnyIcon {
     static let keyboard = "keyboard"
     static let status = "circle.fill"
     static let ssh = "cable.connector"
+    static let user = "person"
+    static let password = "key"
+    static let system = "desktopcomputer"
+    static let distro = "square.stack"
+    static let version = "number"
+    static let kernel = "gearshape"
 }
 
 enum Theme {
@@ -191,5 +198,57 @@ extension View {
 
     func annyGlass(prominent: Bool = false) -> some View {
         buttonStyle(AnnyGlassButtonStyle(prominent: prominent))
+    }
+}
+
+struct SidebarResizeHandle: View {
+    @Binding var width: CGFloat
+    var range: ClosedRange<CGFloat> = 160...520
+    @State private var dragOrigin: CGFloat?
+
+    var body: some View {
+        ZStack {
+            Color.clear
+                .frame(width: 8)
+                .contentShape(Rectangle())
+            Rectangle()
+                .fill(Color.primary.opacity(0.10))
+                .frame(width: 1)
+        }
+        .frame(maxHeight: .infinity)
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if dragOrigin == nil { dragOrigin = width }
+                    let next = (dragOrigin ?? width) + value.translation.width
+                    width = min(max(next, range.lowerBound), range.upperBound)
+                }
+                .onEnded { _ in
+                    dragOrigin = nil
+                }
+        )
+        .help("拖动调整名单宽度")
+    }
+}
+
+struct AnnyWindowChrome: NSViewRepresentable {
+    var title: String
+    var subtitle: String
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            window.title = title
+            window.subtitle = subtitle
+        }
     }
 }

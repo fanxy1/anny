@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var openedTerminals: Set<UUID> = []
     @State private var terminalGenerations: [UUID: Int] = [:]
     @State private var terminalRunning: [UUID: Bool] = [:]
+    @State private var sidebarWidth: CGFloat = 160
 
     private enum DetailPane: Hashable {
         case metrics
@@ -23,19 +24,52 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
-            detailStack
+        NavigationStack {
+            HStack(spacing: 0) {
+                sidebar
+                    .frame(width: sidebarWidth)
+                    .clipped()
+                SidebarResizeHandle(width: $sidebarWidth)
+                detailStack
+                    .frame(minWidth: 620)
+            }
+            .navigationTitle(selected?.displayName ?? "anny")
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button { showAdd = true } label: {
+                        Label("添加", systemImage: AnnyIcon.add)
+                    }
+                    .help("加入监控名单")
+
+                    Button { editingHost = selected } label: {
+                        Label("编辑", systemImage: AnnyIcon.edit)
+                    }
+                    .disabled(selected == nil)
+                    .help("改账户、端口、备注和密码")
+
+                    Button(role: .destructive) {
+                        if let host = selected { remove(host) }
+                    } label: {
+                        Label("移出监控", systemImage: AnnyIcon.remove)
+                    }
+                    .disabled(selected == nil)
+                    .help("只从本软件名单删除，不影响 Tailscale")
+                }
+            }
         }
-        .navigationSplitViewColumnWidth(min: 248, ideal: 292, max: 360)
+        .background {
+            AnnyWindowChrome(
+                title: selected?.displayName ?? "anny",
+                subtitle: selected?.endpointLabel ?? ""
+            )
+        }
         .sheet(isPresented: $showAdd) {
             AddHostSheet()
                 .environmentObject(store)
         }
         .sheet(item: $editingHost) { host in
-            EditHostSheet(host: host) { portChanged in
-                if portChanged, selectedID == host.id {
+            EditHostSheet(host: host) { connectionChanged in
+                if connectionChanged, selectedID == host.id {
                     metrics = nil
                 }
             }
@@ -74,7 +108,15 @@ struct ContentView: View {
                 .simultaneousGesture(TapGesture(count: 2).onEnded { openTerminal(host) })
         }
         .listStyle(.sidebar)
-        .navigationTitle("监控名单")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack {
+                Text("监控名单")
+                    .font(.headline)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+        }
         .overlay {
             if store.hosts.isEmpty {
                 ContentUnavailableView {
@@ -85,28 +127,6 @@ struct ContentView: View {
                 .symbolRenderingMode(.hierarchical)
             }
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button { showAdd = true } label: {
-                    Label("添加", systemImage: AnnyIcon.add)
-                }
-                .help("加入监控名单")
-
-                Button { editingHost = selected } label: {
-                    Label("编辑", systemImage: AnnyIcon.edit)
-                }
-                .disabled(selected == nil)
-                .help("改端口和备注")
-
-                Button(role: .destructive) {
-                    if let host = selected { remove(host) }
-                } label: {
-                    Label("移出监控", systemImage: AnnyIcon.remove)
-                }
-                .disabled(selected == nil)
-                .help("只从本软件名单删除，不影响 Tailscale")
-            }
-        }
     }
 
     @ViewBuilder
@@ -114,15 +134,9 @@ struct ContentView: View {
         let state = sessionState(host.id)
         HStack(spacing: 8) {
             Label {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(host.displayName)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                    Text(verbatim: host.endpointLabel)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                Text(host.displayName)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
             } icon: {
                 AnnySymbol(name: AnnyIcon.host)
                     .foregroundStyle(state == .connected ? Color.green : Color.secondary)
@@ -186,7 +200,6 @@ struct ContentView: View {
             }
             .padding(20)
         }
-        .navigationTitle(selected?.displayName ?? "anny")
     }
 
     private var emptySelection: some View {
@@ -338,7 +351,7 @@ struct ContentView: View {
                     ContentUnavailableView {
                         Label("尚未读取", systemImage: AnnyIcon.metrics)
                     } description: {
-                        Text("点「刷新」通过 SSH 读取 CPU、内存和磁盘。切换名单不会自动拉取。")
+                        Text("点「刷新」读取系统、CPU、内存和磁盘。切换名单不会自动拉取。")
                     }
                     .symbolRenderingMode(.hierarchical)
                     .frame(maxWidth: .infinity, minHeight: 240)
@@ -354,6 +367,8 @@ struct ContentView: View {
                 }
 
                 if let m = metrics, m.error == nil {
+                    systemCard(m)
+
                     AnnyGlassCluster(spacing: 12) {
                         HStack(alignment: .top, spacing: 12) {
                             usageCard(
@@ -400,6 +415,47 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+    }
+
+    @ViewBuilder
+    private func systemCard(_ m: HostMetrics) -> some View {
+        let rows: [(icon: String, title: String, value: String)] = [
+            (AnnyIcon.distro, "发行版", m.osName ?? "—"),
+            (AnnyIcon.version, "版本", m.osVersion ?? "—"),
+            (AnnyIcon.kernel, "内核", m.kernel ?? "—"),
+        ]
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                AnnySymbol(name: AnnyIcon.system)
+                Text("系统")
+                    .font(.headline)
+                Spacer()
+                if let pretty = m.osPretty, !pretty.isEmpty {
+                    Text(pretty)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                }
+            }
+            ForEach(rows, id: \.title) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Label {
+                        Text(row.title)
+                            .foregroundStyle(.secondary)
+                    } icon: {
+                        AnnySymbol(name: row.icon, font: .caption)
+                    }
+                    .frame(width: 88, alignment: .leading)
+                    Text(row.value)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardBackground()
     }
 
     private func usageCard(title: String, icon: String, value: String, percent: Double, subtitle: String? = nil) -> some View {
@@ -531,15 +587,20 @@ struct EditHostSheet: View {
     let hostID: UUID
     let hostname: String
     var onCommit: (Bool) -> Void
+    @State private var user: String
     @State private var portText: String
     @State private var note: String
+    @State private var password: String = ""
+    @State private var hasSavedPassword: Bool
 
     init(host: WatchedHost, onCommit: @escaping (Bool) -> Void = { _ in }) {
         self.hostID = host.id
         self.hostname = host.hostname
         self.onCommit = onCommit
+        _user = State(initialValue: host.user)
         _portText = State(initialValue: Theme.portDigits(host.port))
         _note = State(initialValue: host.note)
+        _hasSavedPassword = State(initialValue: HostSecretStore.hasPassword(for: host.id))
     }
 
     private var parsedPort: Int? { Theme.parsePort(portText) }
@@ -553,14 +614,33 @@ struct EditHostSheet: View {
                             .font(.body.monospaced())
                             .foregroundStyle(.secondary)
                     }
+                    TextField("root", text: $user, prompt: Text("登录账户"))
                     LabeledContent("端口") {
                         PortField(text: $portText)
                     }
-                    TextField("有则名单显示此名称", text: $note, prompt: Text("备注"))
+                    TextField("名单只显示此项", text: $note, prompt: Text("备注"))
                 } header: {
                     Label("监控项", systemImage: AnnyIcon.host)
                 } footer: {
-                    Text(parsedPort == nil ? "端口须为 1–65535" : "不要千分位，例如 10022")
+                    Text(parsedPort == nil ? "端口须为 1–65535" : "没有备注时，名单只显示主机名。")
+                }
+
+                Section {
+                    SecureField(
+                        hasSavedPassword ? "已保存，留空不改" : "没有密钥时填写",
+                        text: $password
+                    )
+                    if hasSavedPassword {
+                        Button("清除已存密码", role: .destructive) {
+                            store.clearPassword(id: hostID)
+                            password = ""
+                            hasSavedPassword = false
+                        }
+                    }
+                } header: {
+                    Label("密码", systemImage: AnnyIcon.password)
+                } footer: {
+                    Text("优先用本机 SSH 密钥。没有密钥时用这里的密码，存在钥匙串，不写入名单文件。")
                 }
             }
             .formStyle(.grouped)
@@ -575,14 +655,18 @@ struct EditHostSheet: View {
                 }
             }
         }
-        .frame(width: 460, height: 320)
+        .frame(width: 480, height: 460)
     }
 
     private func save() {
         guard let port = parsedPort else { return }
-        let changedPort = store.update(id: hostID, port: port)
-        store.update(id: hostID, note: note)
-        onCommit(changedPort)
+        let changed = store.update(id: hostID, user: user, port: port, note: note)
+        var passwordChanged = false
+        if !password.isEmpty {
+            store.setPassword(id: hostID, password: password)
+            passwordChanged = true
+        }
+        onCommit(changed || passwordChanged)
         dismiss()
     }
 }
@@ -593,8 +677,10 @@ struct AddHostSheet: View {
     @State private var peers: [TailscalePeer] = []
     @State private var selected = Set<String>()
     @State private var manual = ""
+    @State private var user = "root"
     @State private var portText = "22"
     @State private var note = ""
+    @State private var password = ""
     @State private var loadError: String?
     @State private var loading = false
     @State private var fetched = false
@@ -667,17 +753,21 @@ struct AddHostSheet: View {
                 }
 
                 Section {
-                    TextField("如 gaoxin-guixi", text: $manual, prompt: Text("主机名"))
+                    TextField("主机名", text: $manual, prompt: Text("如 demo-atlas"))
                         .onSubmit { addManual() }
+                    TextField("root", text: $user, prompt: Text("登录账户"))
                     LabeledContent("端口") {
                         PortField(text: $portText)
                     }
-                    TextField("有则名单显示此名称", text: $note, prompt: Text("备注，可选"))
+                    TextField("名单只显示此项", text: $note, prompt: Text("备注，可选"))
+                    SecureField("没有密钥时填写，可选", text: $password)
                 } header: {
-                    Label("手填", systemImage: AnnyIcon.keyboard)
+                    Label("账户", systemImage: AnnyIcon.user)
                 } footer: {
                     if parsedPort == nil {
                         Text("端口须为 1–65535")
+                    } else {
+                        Text("导入选中与手填共用账户、端口、备注和密码。没有备注时名单只显示主机名。")
                     }
                 }
             }
@@ -697,11 +787,16 @@ struct AddHostSheet: View {
                 }
             }
         }
-        .frame(width: 580, height: 620)
+        .frame(width: 580, height: 680)
     }
 
     private var trimmedNote: String {
         note.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedUser: String {
+        let u = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        return u.isEmpty ? "root" : u
     }
 
     private var canAddManual: Bool {
@@ -736,7 +831,10 @@ struct AddHostSheet: View {
     private func importSelected() {
         guard let port = parsedPort else { return }
         for name in selected {
-            store.add(WatchedHost(hostname: name, port: port, note: trimmedNote))
+            store.add(
+                WatchedHost(hostname: name, user: trimmedUser, port: port, note: trimmedNote),
+                password: password
+            )
         }
         dismiss()
     }
@@ -744,7 +842,10 @@ struct AddHostSheet: View {
     private func addManual() {
         let name = manual.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, let port = parsedPort else { return }
-        store.add(WatchedHost(hostname: name, port: port, note: trimmedNote))
+        store.add(
+            WatchedHost(hostname: name, user: trimmedUser, port: port, note: trimmedNote),
+            password: password
+        )
         dismiss()
     }
 }
