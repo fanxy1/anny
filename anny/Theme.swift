@@ -10,12 +10,14 @@ enum SessionState {
 /// SF Symbols 用法对齐 HIG：工具栏/列表用轮廓，选中与状态用填充，多层符号用 hierarchical。
 enum AnnyIcon {
     static let host = "server.rack"
+    static let group = "folder"
     static let search = "magnifyingglass"
     static let add = "plus"
     static let edit = "pencil"
     static let remove = "minus"
     static let metrics = "chart.bar"
     static let terminal = "terminal"
+    static let inspect = "stethoscope"
     static let refresh = "arrow.clockwise"
     static let reconnect = "arrow.triangle.2.circlepath"
     static let disconnect = "xmark"
@@ -59,6 +61,19 @@ enum Theme {
         if percent >= 90 { return .red }
         if percent >= 75 { return .orange }
         return .green
+    }
+
+    static func inspectColor(_ severity: InspectSeverity) -> Color {
+        switch severity {
+        case .ok: return .green
+        case .warning: return .orange
+        case .danger: return .red
+        }
+    }
+
+    static func percentText(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.0f%%", value)
     }
 }
 
@@ -204,7 +219,7 @@ extension View {
 
 struct SidebarResizeHandle: View {
     @Binding var width: CGFloat
-    var range: ClosedRange<CGFloat> = 160...520
+    var range: ClosedRange<CGFloat> = 180...520
     @State private var dragOrigin: CGFloat?
 
     var body: some View {

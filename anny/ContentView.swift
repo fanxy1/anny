@@ -1,8 +1,11 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: HostStore
+    @EnvironmentObject private var inspect: InspectStore
     @State private var selectedID: UUID?
+    @State private var workspace: Workspace = .machine
     @State private var metrics: HostMetrics?
     @State private var loading = false
     @State private var actionError: String?
@@ -12,9 +15,19 @@ struct ContentView: View {
     @State private var openedTerminals: Set<UUID> = []
     @State private var terminalGenerations: [UUID: Int] = [:]
     @State private var terminalRunning: [UUID: Bool] = [:]
-    @State private var sidebarWidth: CGFloat = 160
+    @State private var sidebarWidth: CGFloat = 220
     @State private var hostSearch = ""
     @FocusState private var searchFocused: Bool
+    @State private var renamingGroupID: UUID?
+    @State private var renameDraft = ""
+    @FocusState private var renameFocused: Bool
+    @State private var dropTarget: String?
+    @State private var collapseTapLock: Date?
+
+    private enum Workspace: Hashable {
+        case machine
+        case inspect
+    }
 
     private enum DetailPane: Hashable {
         case metrics
@@ -23,6 +36,27 @@ struct ContentView: View {
 
     private var selected: WatchedHost? {
         store.hosts.first { $0.id == selectedID }
+    }
+
+    private var machineSubtitle: String {
+        guard let host = selected else { return "" }
+        if let ip = metrics?.publicIP, !ip.isEmpty {
+            return "\(host.endpointLabel) · \(ip)"
+        }
+        return host.endpointLabel
+    }
+
+    private var inspectSubtitle: String {
+        if inspect.isRunning {
+            return "\(inspect.finishedCount)/\(inspect.runIDs.count)"
+        }
+        if inspect.dangerCount > 0 {
+            return "\(inspect.dangerCount) 台危险"
+        }
+        if inspect.runIDs.isEmpty {
+            return inspect.checked.isEmpty ? "" : "已勾选 \(inspect.checked.count) 台"
+        }
+        return "\(inspect.runIDs.count) 台"
     }
 
     var body: some View {
@@ -35,8 +69,18 @@ struct ContentView: View {
                 detailStack
                     .frame(minWidth: 620)
             }
-            .navigationTitle(selected?.displayName ?? "anny")
+            .navigationTitle(workspace == .inspect ? "巡查" : (selected?.displayName ?? "anny"))
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Picker("工作区", selection: $workspace) {
+                        Text("机器").tag(Workspace.machine)
+                        Text("巡查").tag(Workspace.inspect)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 148)
+                    .help("切换单机查看和批量巡查")
+                }
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { showAdd = true } label: {
                         Label("添加", systemImage: AnnyIcon.add)
@@ -61,8 +105,10 @@ struct ContentView: View {
         }
         .background {
             AnnyWindowChrome(
-                title: selected?.displayName ?? "anny",
-                subtitle: selected?.endpointLabel ?? ""
+                title: workspace == .inspect ? "巡查" : (selected?.displayName ?? "anny"),
+                subtitle: workspace == .inspect
+                    ? inspectSubtitle
+                    : machineSubtitle
             )
         }
         .sheet(isPresented: $showAdd) {
@@ -95,14 +141,10 @@ struct ContentView: View {
                 selectedID = store.hosts.first?.id
             }
         }
-        .onChange(of: selectedID) { _, newID in
+        .onChange(of: selectedID) { _, _ in
+            searchFocused = false
             metrics = nil
             loading = false
-            guard detailPane == .terminal,
-                  let newID,
-                  let host = store.hosts.first(where: { $0.id == newID })
-            else { return }
-            followTerminal(host)
         }
     }
 
@@ -114,93 +156,293 @@ struct ContentView: View {
         store.hosts.filter { $0.matches(hostSearch) }
     }
 
+    private var buckets: [HostBucket] {
+        let shown = visibleHosts
+        var result = store.groups.map { group in
+            HostBucket(
+                groupID: group.id,
+                title: group.name,
+                hosts: shown.filter { $0.groupID == group.id },
+                collapsed: isSearching ? false : group.collapsed
+            )
+        }
+        let loose = shown.filter { $0.groupID == nil }
+        if !isSearching || !loose.isEmpty {
+            result.append(
+                HostBucket(
+                    groupID: nil,
+                    title: "未分组",
+                    hosts: loose,
+                    collapsed: isSearching ? false : store.ungroupedCollapsed
+                )
+            )
+        }
+        if isSearching {
+            result.removeAll { $0.hosts.isEmpty }
+        }
+        return result
+    }
+
+    private var sidebarItems: [SidebarItem] {
+        if visibleHosts.isEmpty, isSearching {
+            return [.emptySearch]
+        }
+        return buckets.flatMap { bucket in
+            var items: [SidebarItem] = [.group(bucket)]
+            if !bucket.collapsed {
+                items += bucket.hosts.map { .host(bucketID: bucket.id, host: $0) }
+            }
+            return items
+        }
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("监控名单")
-                        .font(.headline)
-                    Spacer(minLength: 0)
-                }
-                HStack(spacing: 6) {
-                    AnnySymbol(name: AnnyIcon.search, font: .caption)
-                        .foregroundStyle(.secondary)
-                    TextField("搜索", text: $hostSearch, prompt: Text("备注或主机名"))
-                        .textFieldStyle(.plain)
-                        .focused($searchFocused)
-                    if isSearching {
-                        Button {
-                            hostSearch = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("清除搜索")
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            sidebarChrome
+            sidebarList
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
 
-            List(selection: $selectedID) {
-                if visibleHosts.isEmpty, isSearching {
-                    Label("没有匹配", systemImage: AnnyIcon.search)
-                        .foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
-                        .selectionDisabled()
-                }
-                ForEach(visibleHosts) { host in
-                    hostRow(host)
-                        .tag(host.id)
-                        .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
-                        .contextMenu { hostMenu(host) }
-                        .simultaneousGesture(TapGesture(count: 2).onEnded { openTerminal(host) })
-                        .moveDisabled(isSearching)
-                }
-                .onMove(perform: isSearching ? nil : moveVisibleHosts)
+    private var sidebarList: some View {
+        List(selection: $selectedID) {
+            ForEach(sidebarItems) { item in
+                sidebarRow(item)
             }
-            .listStyle(.sidebar)
-            .overlay {
-                if store.hosts.isEmpty {
-                    ContentUnavailableView {
-                        Label("没有监控项", systemImage: AnnyIcon.host)
-                    } description: {
-                        Text("点工具栏加号加入一台机器。")
-                    }
-                    .symbolRenderingMode(.hierarchical)
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .environment(\.defaultMinListRowHeight, 18)
+        .contentMargins(.top, 2, for: .scrollContent)
+        .overlay {
+            if store.hosts.isEmpty, store.groups.isEmpty {
+                ContentUnavailableView {
+                    Label("没有监控项", systemImage: AnnyIcon.host)
+                } description: {
+                    Text("点工具栏加号加入一台机器。")
                 }
+                .symbolRenderingMode(.hierarchical)
             }
         }
     }
 
-    private func moveVisibleHosts(from source: IndexSet, to destination: Int) {
-        store.move(from: source, to: destination)
+    @ViewBuilder
+    private func sidebarRow(_ item: SidebarItem) -> some View {
+        switch item {
+        case .emptySearch:
+            emptySearchRow
+        case .group(let bucket):
+            groupListRow(bucket)
+        case .host(let bucketID, let host):
+            hostListRow(bucketID: bucketID, host: host)
+        }
+    }
+
+    private var emptySearchRow: some View {
+        Text("没有匹配")
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 8))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .selectionDisabled()
+    }
+
+    private func groupListRow(_ bucket: HostBucket) -> some View {
+        groupHeader(bucket)
+            .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 8))
+            .listRowSeparator(.hidden)
+            .listRowBackground(dropTarget == bucket.id ? Color.accentColor.opacity(0.14) : Color.clear)
+            .selectionDisabled()
+    }
+
+    private func hostListRow(bucketID: String, host: WatchedHost) -> some View {
+        hostRow(host)
+            .tag(host.id)
+            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+            .listRowSeparator(.hidden)
+            .listRowBackground(dropTarget == "host-\(host.id.uuidString)" ? Color.accentColor.opacity(0.14) : Color.clear)
+            .background {
+                HostListDoubleClick {
+                    openTerminal(host)
+                    searchFocused = false
+                }
+                .allowsHitTesting(false)
+            }
+            .contextMenu { hostMenu(host) }
+            .draggable(host.id.uuidString)
+            .dropDestination(for: String.self) { items, _ in
+                guard let bucket = buckets.first(where: { $0.id == bucketID }) else { return false }
+                return dropHost(items, onto: bucket, before: host.id)
+            } isTargeted: { hovering in
+                dropTarget = hovering && !isSearching ? "host-\(host.id.uuidString)" : nil
+            }
+    }
+
+    private var sidebarChrome: some View {
+        HStack(spacing: 6) {
+            Image(systemName: AnnyIcon.search)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+            TextField("搜索", text: $hostSearch, prompt: Text("备注或主机名"))
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($searchFocused)
+            if isSearching {
+                Button {
+                    hostSearch = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("清除搜索")
+            }
+            Button {
+                commitRename()
+                beginRename(store.addGroup())
+            } label: {
+                Image(systemName: AnnyIcon.add)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("新增分组")
+            .disabled(isSearching)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.6)
+        }
+    }
+
+    @ViewBuilder
+    private func groupHeader(_ bucket: HostBucket) -> some View {
+        let renaming = bucket.groupID != nil && renamingGroupID == bucket.groupID
+        HStack(spacing: 5) {
+            let ids = bucket.hosts.map(\.id)
+            Toggle("", isOn: Binding(
+                get: { !ids.isEmpty && ids.allSatisfy { inspect.checked.contains($0) } },
+                set: { inspect.setChecked(ids, $0) }
+            ))
+            .toggleStyle(.checkbox)
+            .controlSize(.mini)
+            .labelsHidden()
+            .disabled(ids.isEmpty)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.tertiary)
+                .rotationEffect(.degrees(bucket.collapsed ? 0 : 90))
+                .frame(width: 10, height: 10)
+            if let groupID = bucket.groupID, renamingGroupID == groupID {
+                TextField("分组名", text: $renameDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .focused($renameFocused)
+                    .onSubmit { commitRename() }
+                    .onChange(of: renameFocused) { _, focused in
+                        if !focused { commitRename() }
+                    }
+            } else {
+                Text(bucket.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text("\(bucket.hosts.count)")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, minHeight: 20, maxHeight: 20, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !renaming else { return }
+            let now = Date()
+            if let lock = collapseTapLock, now.timeIntervalSince(lock) < 0.35 { return }
+            collapseTapLock = now
+            store.setCollapsed(groupID: bucket.groupID, collapsed: !bucket.collapsed)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            dropHost(items, onto: bucket, before: nil)
+        } isTargeted: { hovering in
+            dropTarget = hovering ? bucket.id : nil
+        }
+        .contextMenu {
+            Button(bucket.collapsed ? "展开" : "折叠") {
+                store.toggleCollapsed(groupID: bucket.groupID)
+            }
+            Button("巡查本组") {
+                inspect.setChecked(bucket.hosts.map(\.id), true)
+                workspace = .inspect
+                inspect.start(hosts: store.hosts, selectedID: selectedID)
+            }
+            .disabled(bucket.hosts.isEmpty || inspect.isRunning)
+            if let groupID = bucket.groupID, let group = store.groups.first(where: { $0.id == groupID }) {
+                Button("重命名") { beginRename(group) }
+                    .disabled(isSearching)
+                Button("删除分组", role: .destructive) { store.deleteGroup(id: groupID) }
+                    .disabled(isSearching)
+            }
+        }
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityLabel("\(bucket.title)，\(bucket.hosts.count) 台")
+        .accessibilityHint(bucket.collapsed ? "展开分组" : "折叠分组")
+    }
+
+    private func beginRename(_ group: HostGroup) {
+        renameDraft = group.name
+        renamingGroupID = group.id
+        renameFocused = true
+    }
+
+    private func commitRename() {
+        guard let id = renamingGroupID else { return }
+        store.renameGroup(id: id, to: renameDraft)
+        renamingGroupID = nil
+    }
+
+    @discardableResult
+    private func dropHost(_ items: [String], onto bucket: HostBucket, before neighborID: UUID?) -> Bool {
+        guard !isSearching, let raw = items.first, let id = UUID(uuidString: raw) else { return false }
+        store.moveHost(id, toGroup: bucket.groupID, before: neighborID)
+        if bucket.collapsed {
+            store.setCollapsed(groupID: bucket.groupID, collapsed: false)
+        }
+        return true
     }
 
     @ViewBuilder
     private func hostRow(_ host: WatchedHost) -> some View {
         let state = sessionState(host.id)
-        HStack(spacing: 8) {
-            Label {
-                Text(host.displayName)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-            } icon: {
-                AnnySymbol(name: AnnyIcon.host)
-                    .foregroundStyle(state == .connected ? Color.green : Color.secondary)
-            }
+        HStack(spacing: 6) {
+            Toggle("", isOn: Binding(
+                get: { inspect.isChecked(host.id) },
+                set: { inspect.setChecked(host.id, $0) }
+            ))
+            .toggleStyle(.checkbox)
+            .controlSize(.mini)
+            .labelsHidden()
+            Image(systemName: AnnyIcon.host)
+                .font(.system(size: 10))
+                .foregroundStyle(state == .connected ? Color.green : Color.secondary.opacity(0.7))
+                .frame(width: 12)
+            Text(host.displayName)
+                .font(.system(size: 12))
+                .lineLimit(1)
             Spacer(minLength: 0)
-            if state == .connected {
-                AnnySymbol(name: AnnyIcon.status, font: .system(size: 7))
-                    .foregroundStyle(.green)
-                    .accessibilityLabel("已连接")
+            if let record = inspect.record(for: host.id) {
+                Circle()
+                    .fill(Theme.inspectColor(record.severity))
+                    .frame(width: 6, height: 6)
+                    .help(record.error ?? "上次巡查 \(Theme.percentText(max(record.cpuPercent ?? 0, record.memoryPercent ?? 0, record.diskPercent ?? 0)))")
             }
         }
+        .frame(maxWidth: .infinity, minHeight: 20, maxHeight: 20, alignment: .leading)
+        .contentShape(Rectangle())
+        .help(host.endpointLabel)
     }
 
     @ViewBuilder
@@ -210,6 +452,16 @@ struct ContentView: View {
             Button("断开", systemImage: AnnyIcon.disconnect, role: .destructive) { disconnect(host) }
         }
         Button("编辑", systemImage: AnnyIcon.edit) { editingHost = host }
+        Button(inspect.isChecked(host.id) ? "移出巡查" : "加入巡查") {
+            inspect.setChecked(host.id, !inspect.isChecked(host.id))
+            workspace = .inspect
+        }
+        Menu("移到分组") {
+            Button("未分组") { store.moveHost(host.id, toGroup: nil, before: nil) }
+            ForEach(store.groups) { group in
+                Button(group.name) { store.moveHost(host.id, toGroup: group.id, before: nil) }
+            }
+        }
         Divider()
         Button("移出监控", systemImage: AnnyIcon.remove, role: .destructive) { remove(host) }
     }
@@ -222,37 +474,53 @@ struct ContentView: View {
     private var detailStack: some View {
         ZStack {
             AnnyAtmosphere()
-            VStack(alignment: .leading, spacing: 16) {
-                if let host = selected {
-                    hostHeader(host)
-                    panePicker
-                }
-
-                ZStack {
-                    if let host = selected {
-                        metricsPane(host)
-                            .opacity(detailPane == .metrics ? 1 : 0)
-                            .allowsHitTesting(detailPane == .metrics)
-                    } else {
-                        emptySelection
-                    }
-
-                    ForEach(liveTerminalIDs, id: \.self) { id in
-                        if let host = store.hosts.first(where: { $0.id == id }) {
-                            terminalChrome(host)
-                                .opacity(detailPane == .terminal && selectedID == id ? 1 : 0)
-                                .allowsHitTesting(detailPane == .terminal && selectedID == id)
-                        }
-                    }
-
-                    if let host = selected, detailPane == .terminal, !openedTerminals.contains(host.id) {
-                        emptyTerminal
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            machineWorkspace
+                .padding(20)
+                .opacity(workspace == .machine ? 1 : 0)
+                .allowsHitTesting(workspace == .machine)
+            InspectView(selectedID: selectedID) { id in
+                selectedID = id
             }
             .padding(20)
+            .opacity(workspace == .inspect ? 1 : 0)
+            .allowsHitTesting(workspace == .inspect)
         }
+        .transaction { $0.animation = nil }
+    }
+
+    private var machineWorkspace: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let host = selected {
+                hostHeader(host)
+            }
+
+            machineBody
+        }
+    }
+
+    private var machineBody: some View {
+        ZStack {
+            if let host = selected {
+                metricsPane(host)
+                    .opacity(detailPane == .metrics ? 1 : 0)
+                    .allowsHitTesting(detailPane == .metrics)
+            } else {
+                emptySelection
+            }
+
+            ForEach(liveTerminalIDs, id: \.self) { id in
+                if let host = store.hosts.first(where: { $0.id == id }) {
+                    terminalChrome(host)
+                        .opacity(detailPane == .terminal && selectedID == id ? 1 : 0)
+                        .allowsHitTesting(detailPane == .terminal && selectedID == id)
+                }
+            }
+
+            if let host = selected, detailPane == .terminal, !openedTerminals.contains(host.id) {
+                emptyTerminal
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var emptySelection: some View {
@@ -270,22 +538,11 @@ struct ContentView: View {
         ContentUnavailableView {
             Label("尚未连接", systemImage: AnnyIcon.terminal)
         } description: {
-            Text("点「连接」或双击左侧名单。在终端页再点其他机器会自动连上。")
+            Text("点「连接」或双击左侧名单。切换机器不会自动连接。")
         }
         .symbolRenderingMode(.hierarchical)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .cardBackground()
-    }
-
-    private var panePicker: some View {
-        Picker("", selection: $detailPane) {
-            Label("资源", systemImage: AnnyIcon.metrics).tag(DetailPane.metrics)
-            Label("终端", systemImage: AnnyIcon.terminal).tag(DetailPane.terminal)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.large)
-        .frame(maxWidth: 280)
     }
 
     @ViewBuilder
@@ -312,17 +569,37 @@ struct ContentView: View {
                 }
                 .foregroundStyle(.secondary)
                 .labelStyle(.titleAndIcon)
+                if let ip = metrics?.publicIP, !ip.isEmpty {
+                    Label {
+                        Text(verbatim: ip)
+                            .font(.subheadline.monospaced())
+                            .textSelection(.enabled)
+                    } icon: {
+                        AnnySymbol(name: AnnyIcon.network, font: .subheadline)
+                    }
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+                    .help("外网出口")
+                }
             }
 
             Spacer(minLength: 12)
 
+            Picker("面板", selection: $detailPane) {
+                Text("资源").tag(DetailPane.metrics)
+                Text("终端").tag(DetailPane.terminal)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 148)
+            .help("查看资源或打开终端")
+
             AnnyGlassCluster(spacing: 10) {
                 HStack(spacing: 10) {
-                    if detailPane == .metrics {
-                        Button("刷新", systemImage: AnnyIcon.refresh) { refresh() }
-                            .disabled(loading)
-                            .annyGlass()
-                    }
+                    Button("刷新", systemImage: AnnyIcon.refresh) { refresh() }
+                        .disabled(loading)
+                        .help("读取 CPU、内存和磁盘")
+                        .annyGlass()
                     sessionButton(host, state: state)
                 }
             }
@@ -473,6 +750,7 @@ struct ContentView: View {
     @ViewBuilder
     private func systemCard(_ m: HostMetrics) -> some View {
         let rows: [(icon: String, title: String, value: String)] = [
+            (AnnyIcon.network, "出口", m.publicIP ?? "—"),
             (AnnyIcon.distro, "发行版", m.osName ?? "—"),
             (AnnyIcon.version, "版本", m.osVersion ?? "—"),
             (AnnyIcon.kernel, "内核", m.kernel ?? "—"),
@@ -572,15 +850,6 @@ struct ContentView: View {
         }
     }
 
-    private func followTerminal(_ host: WatchedHost) {
-        if terminalRunning[host.id] == true { return }
-        if openedTerminals.contains(host.id) {
-            reconnect(host)
-        } else {
-            openTerminal(host)
-        }
-    }
-
     private func openTerminal(_ host: WatchedHost) {
         selectedID = host.id
         openedTerminals.insert(host.id)
@@ -607,6 +876,7 @@ struct ContentView: View {
 
     private func remove(_ host: WatchedHost) {
         closeTerminal(host.id)
+        inspect.forget(host.id)
         store.removeFromWatchlist(host)
         if selectedID == host.id {
             selectedID = store.hosts.first?.id
@@ -900,5 +1170,87 @@ struct AddHostSheet: View {
             password: password
         )
         dismiss()
+    }
+}
+
+private struct HostBucket: Identifiable {
+    var id: String { groupID?.uuidString ?? "ungrouped" }
+    var groupID: UUID?
+    var title: String
+    var hosts: [WatchedHost]
+    var collapsed: Bool
+}
+
+private enum SidebarItem: Identifiable {
+    case emptySearch
+    case group(HostBucket)
+    case host(bucketID: String, host: WatchedHost)
+
+    var id: String {
+        switch self {
+        case .emptySearch:
+            return "empty-search"
+        case .group(let bucket):
+            return "g-\(bucket.id)"
+        case .host(_, let host):
+            return "h-\(host.id.uuidString)"
+        }
+    }
+}
+
+/// 只在主机行范围内认双击，组头不会开终端。事件原样下放。
+private struct HostListDoubleClick: NSViewRepresentable {
+    var action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.attach()
+        return context.coordinator.view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.action = action
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class Coordinator {
+        var action: () -> Void
+        let view = PassThroughView()
+        private var monitor: Any?
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        func attach() {
+            detach()
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self, event.clickCount == 2 else { return event }
+                let loc = self.view.convert(event.locationInWindow, from: nil)
+                if self.view.window != nil, self.view.bounds.contains(loc) {
+                    DispatchQueue.main.async { self.action() }
+                }
+                return event
+            }
+        }
+
+        func detach() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        deinit { detach() }
+    }
+
+    final class PassThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }

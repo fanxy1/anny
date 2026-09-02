@@ -3,6 +3,14 @@ import Foundation
 enum SSHService {
     static func fetchMetrics(_ host: WatchedHost) throws -> HostMetrics {
         let script = """
+        wanf="/tmp/anny-wan-$$"
+        (
+          curl -4 -fsS --max-time 2 https://4.ipw.cn ||
+          curl -4 -fsS --max-time 2 https://ip.3322.net ||
+          wget -qO- -T 2 https://4.ipw.cn ||
+          curl -4 -fsS --max-time 2 https://ifconfig.me/ip
+        ) >"$wanf" 2>/dev/null &
+        wanpid=$!
         echo '===LOAD==='
         cat /proc/loadavg
         echo '===MEM==='
@@ -22,6 +30,10 @@ enum SSHService {
         fi
         echo '===UNAME==='
         uname -srm
+        wait "$wanpid" 2>/dev/null
+        echo '===WAN==='
+        tr -d '\\r' <"$wanf" 2>/dev/null | grep -Eo '([0-9]{1,3}\\.){3}[0-9]{1,3}' | head -n1
+        rm -f "$wanf"
         """
 
         let hasPassword = HostSecretStore.hasPassword(for: host.id)
@@ -66,6 +78,7 @@ enum SSHService {
         var osVersion: String?
         var osVersionId: String?
         var kernel: String?
+        var publicIP: String?
         var section = ""
 
         for line in raw.split(whereSeparator: \.isNewline).map(String.init) {
@@ -117,6 +130,8 @@ enum SSHService {
             case "===UNAME===":
                 let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !t.isEmpty { kernel = t }
+            case "===WAN===":
+                if publicIP == nil { publicIP = Self.parsePublicIP(line) }
             default:
                 break
             }
@@ -132,9 +147,19 @@ enum SSHService {
             osName: osName,
             osVersion: osVersion ?? osVersionId,
             kernel: kernel,
+            publicIP: publicIP,
             fetchedAt: Date(),
             error: nil
         )
+    }
+
+    private static func parsePublicIP(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = t.split(separator: ".")
+        guard parts.count == 4,
+              parts.allSatisfy({ Int($0).map { (0...255).contains($0) } ?? false })
+        else { return nil }
+        return t
     }
 
     private static func osReleaseField(_ line: String) -> (String, String)? {
