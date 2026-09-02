@@ -31,6 +31,14 @@ struct WatchedHost: Identifiable, Hashable, Codable {
 
     /// 不用 LocalizedStringKey，避免端口被格式化成 10,022。
     var endpointLabel: String { "\(sshTarget):\(port)" }
+
+    /// 只搜备注和主机名，不搜账户、端口。
+    func matches(_ query: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if q.isEmpty { return true }
+        return note.localizedStandardContains(q)
+            || hostname.localizedStandardContains(q)
+    }
 }
 
 struct TailscalePeer: Identifiable, Hashable {

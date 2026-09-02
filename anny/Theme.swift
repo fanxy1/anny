@@ -10,6 +10,7 @@ enum SessionState {
 /// SF Symbols 用法对齐 HIG：工具栏/列表用轮廓，选中与状态用填充，多层符号用 hierarchical。
 enum AnnyIcon {
     static let host = "server.rack"
+    static let search = "magnifyingglass"
     static let add = "plus"
     static let edit = "pencil"
     static let remove = "minus"

@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var terminalGenerations: [UUID: Int] = [:]
     @State private var terminalRunning: [UUID: Bool] = [:]
     @State private var sidebarWidth: CGFloat = 160
+    @State private var hostSearch = ""
+    @FocusState private var searchFocused: Bool
 
     private enum DetailPane: Hashable {
         case metrics
@@ -75,6 +77,11 @@ struct ContentView: View {
             }
             .environmentObject(store)
         }
+        .background {
+            Button("搜索") { searchFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .hidden()
+        }
         .alert("出错", isPresented: Binding(
             get: { actionError != nil },
             set: { if !$0 { actionError = nil } }
@@ -99,34 +106,80 @@ struct ContentView: View {
         }
     }
 
+    private var isSearching: Bool {
+        !hostSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var visibleHosts: [WatchedHost] {
+        store.hosts.filter { $0.matches(hostSearch) }
+    }
+
     private var sidebar: some View {
-        List(store.hosts, selection: $selectedID) { host in
-            hostRow(host)
-                .tag(host.id)
-                .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
-                .contextMenu { hostMenu(host) }
-                .simultaneousGesture(TapGesture(count: 2).onEnded { openTerminal(host) })
-        }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            HStack {
-                Text("监控名单")
-                    .font(.headline)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-        }
-        .overlay {
-            if store.hosts.isEmpty {
-                ContentUnavailableView {
-                    Label("没有监控项", systemImage: AnnyIcon.host)
-                } description: {
-                    Text("点工具栏加号加入一台机器。")
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("监控名单")
+                        .font(.headline)
+                    Spacer(minLength: 0)
                 }
-                .symbolRenderingMode(.hierarchical)
+                HStack(spacing: 6) {
+                    AnnySymbol(name: AnnyIcon.search, font: .caption)
+                        .foregroundStyle(.secondary)
+                    TextField("搜索", text: $hostSearch, prompt: Text("备注或主机名"))
+                        .textFieldStyle(.plain)
+                        .focused($searchFocused)
+                    if isSearching {
+                        Button {
+                            hostSearch = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("清除搜索")
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            List(selection: $selectedID) {
+                if visibleHosts.isEmpty, isSearching {
+                    Label("没有匹配", systemImage: AnnyIcon.search)
+                        .foregroundStyle(.secondary)
+                        .listRowSeparator(.hidden)
+                        .selectionDisabled()
+                }
+                ForEach(visibleHosts) { host in
+                    hostRow(host)
+                        .tag(host.id)
+                        .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8))
+                        .contextMenu { hostMenu(host) }
+                        .simultaneousGesture(TapGesture(count: 2).onEnded { openTerminal(host) })
+                        .moveDisabled(isSearching)
+                }
+                .onMove(perform: isSearching ? nil : moveVisibleHosts)
+            }
+            .listStyle(.sidebar)
+            .overlay {
+                if store.hosts.isEmpty {
+                    ContentUnavailableView {
+                        Label("没有监控项", systemImage: AnnyIcon.host)
+                    } description: {
+                        Text("点工具栏加号加入一台机器。")
+                    }
+                    .symbolRenderingMode(.hierarchical)
+                }
             }
         }
+    }
+
+    private func moveVisibleHosts(from source: IndexSet, to destination: Int) {
+        store.move(from: source, to: destination)
     }
 
     @ViewBuilder
