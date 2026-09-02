@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct AnnyApp: App {
     @StateObject private var store = HostStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -13,5 +14,8 @@ struct AnnyApp: App {
         .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
         .defaultSize(width: 1120, height: 740)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { store.load() }
+        }
     }
 }

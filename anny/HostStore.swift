@@ -1,8 +1,12 @@
+import Darwin
 import Foundation
 
 @MainActor
 final class HostStore: ObservableObject {
     @Published private(set) var hosts: [WatchedHost] = []
+
+    private var directoryWatcher: DispatchSourceFileSystemObject?
+    private var reloadTask: Task<Void, Never>?
 
     private var fileURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -14,6 +18,7 @@ final class HostStore: ObservableObject {
     init() {
         migrateLegacyWatchlistIfNeeded()
         load()
+        startWatching()
     }
 
     /// 旧版名单在 Application Support/FanxyTS，只搬一次。
@@ -27,8 +32,12 @@ final class HostStore: ObservableObject {
     }
 
     func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        hosts = (try? JSONDecoder().decode([WatchedHost].self, from: data)) ?? []
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([WatchedHost].self, from: data)
+        else { return }
+        if decoded != hosts {
+            hosts = decoded
+        }
     }
 
     func add(_ host: WatchedHost, password: String? = nil) {
@@ -38,7 +47,6 @@ final class HostStore: ObservableObject {
             return
         }
         hosts.append(host)
-        hosts.sort { $0.hostname.localizedCaseInsensitiveCompare($1.hostname) == .orderedAscending }
         if let password, !password.isEmpty {
             HostSecretStore.save(password, for: host.id)
         }
@@ -89,6 +97,11 @@ final class HostStore: ObservableObject {
         HostSecretStore.delete(for: id)
     }
 
+    func move(from source: IndexSet, to destination: Int) {
+        hosts.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
     /// 只删本机监控名单，不调用 tailscale / headscale。
     func removeFromWatchlist(_ host: WatchedHost) {
         HostSecretStore.delete(for: host.id)
@@ -99,5 +112,34 @@ final class HostStore: ObservableObject {
     private func save() {
         let data = try? JSONEncoder().encode(hosts)
         try? data?.write(to: fileURL, options: .atomic)
+    }
+
+    /// 监视目录而不是文件：原子写入会换 inode，盯着旧文件会丢事件。
+    private func startWatching() {
+        let dir = fileURL.deletingLastPathComponent()
+        let fd = open(dir.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .delete, .extend, .attrib],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            self?.scheduleReload()
+        }
+        source.setCancelHandler {
+            close(fd)
+        }
+        source.resume()
+        directoryWatcher = source
+    }
+
+    private func scheduleReload() {
+        reloadTask?.cancel()
+        reloadTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled else { return }
+            load()
+        }
     }
 }
