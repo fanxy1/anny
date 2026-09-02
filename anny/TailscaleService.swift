@@ -26,9 +26,17 @@ enum TailscaleService {
                 userInfo: [NSLocalizedDescriptionKey: "找不到 tailscale。本机需已安装 Tailscale.app（菜单栏那个），应用会调用 /Applications/Tailscale.app/Contents/MacOS/Tailscale。"]
             )
         }
-        let result = try ProcessRun.run(bin, arguments: ["status", "--json"], timeout: 20)
-        guard result.status == 0 else {
-            let msg = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Tailscale.app 是 CLI/GUI 双模。从 GUI 进程拉起时环境里没有 TERM，
+        // 它会当成图形界面启动，stdout 变成 CLIError 3，不是 JSON。
+        var env = ProcessInfo.processInfo.environment
+        if (env["TERM"] ?? "").isEmpty {
+            env["TERM"] = "dumb"
+        }
+        let result = try ProcessRun.run(bin, arguments: ["status", "--json"], environment: env, timeout: 20)
+        let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.status == 0, stdout.first == "{" else {
+            let msg = [stderr, stdout].first { !$0.isEmpty } ?? ""
             throw NSError(
                 domain: "anny",
                 code: 2,
@@ -36,7 +44,7 @@ enum TailscaleService {
             )
         }
 
-        let status = try JSONDecoder().decode(Status.self, from: Data(result.stdout.utf8))
+        let status = try JSONDecoder().decode(Status.self, from: Data(stdout.utf8))
         var nodes: [Status.Node] = []
         if let selfNode = status.selfNode { nodes.append(selfNode) }
         if let peers = status.Peer { nodes.append(contentsOf: peers.values) }
