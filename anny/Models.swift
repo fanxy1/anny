@@ -1,24 +1,114 @@
 import Foundation
 
+struct HostGroup: Identifiable, Hashable, Codable {
+    var id: UUID
+    var name: String
+    var collapsed: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, collapsed
+    }
+
+    init(id: UUID = UUID(), name: String, collapsed: Bool = false) {
+        self.id = id
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.name = trimmed.isEmpty ? "未命名分组" : trimmed
+        self.collapsed = collapsed
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        collapsed = try c.decodeIfPresent(Bool.self, forKey: .collapsed) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(collapsed, forKey: .collapsed)
+    }
+}
+
+struct Watchlist: Hashable, Codable {
+    var groups: [HostGroup]
+    var hosts: [WatchedHost]
+    var ungroupedCollapsed: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case groups, hosts, ungroupedCollapsed
+    }
+
+    init(groups: [HostGroup], hosts: [WatchedHost], ungroupedCollapsed: Bool = false) {
+        self.groups = groups
+        self.hosts = hosts
+        self.ungroupedCollapsed = ungroupedCollapsed
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        groups = try c.decode([HostGroup].self, forKey: .groups)
+        hosts = try c.decode([WatchedHost].self, forKey: .hosts)
+        ungroupedCollapsed = try c.decodeIfPresent(Bool.self, forKey: .ungroupedCollapsed) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(groups, forKey: .groups)
+        try c.encode(hosts, forKey: .hosts)
+        try c.encode(ungroupedCollapsed, forKey: .ungroupedCollapsed)
+    }
+}
+
+enum WatchlistFile {
+    static func decode(_ data: Data) throws -> Watchlist {
+        let trimmed = data.drop(while: { [0x09, 0x0A, 0x0D, 0x20].contains($0) })
+        guard let first = trimmed.first else {
+            return Watchlist(groups: [], hosts: [])
+        }
+        let decoder = JSONDecoder()
+        if first == UInt8(ascii: "[") {
+            let hosts = try decoder.decode([WatchedHost].self, from: data)
+            return Watchlist(groups: [], hosts: hosts)
+        }
+        return sanitize(try decoder.decode(Watchlist.self, from: data))
+    }
+
+    static func sanitize(_ list: Watchlist) -> Watchlist {
+        let ids = Set(list.groups.map(\.id))
+        var hosts = list.hosts
+        for i in hosts.indices {
+            if let gid = hosts[i].groupID, !ids.contains(gid) {
+                hosts[i].groupID = nil
+            }
+        }
+        return Watchlist(groups: list.groups, hosts: hosts)
+    }
+}
+
 struct WatchedHost: Identifiable, Hashable, Codable {
     var id: UUID
     var hostname: String
     var user: String
     var port: Int
     var note: String
+    var groupID: UUID?
 
     init(
         id: UUID = UUID(),
         hostname: String,
         user: String = "root",
         port: Int = 22,
-        note: String = ""
+        note: String = "",
+        groupID: UUID? = nil
     ) {
         self.id = id
         self.hostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         self.user = user.isEmpty ? "root" : user
         self.port = port > 0 ? port : 22
         self.note = note
+        self.groupID = groupID
     }
 
     var sshTarget: String { "\(user)@\(hostname)" }
@@ -68,6 +158,7 @@ struct HostMetrics: Hashable {
     var osName: String? = nil
     var osVersion: String? = nil
     var kernel: String? = nil
+    var publicIP: String? = nil
     var fetchedAt: Date
     var error: String?
 
@@ -75,4 +166,71 @@ struct HostMetrics: Hashable {
         guard let total = memTotal, let avail = memAvailable else { return nil }
         return max(0, total - avail)
     }
+
+    var memoryPercent: Double? {
+        guard let total = memTotal, let used = memUsed, total > 0 else { return nil }
+        return Double(used) / Double(total) * 100
+    }
+
+    var worstDiskPercent: Double? {
+        let values = disks.compactMap { Double($0.percent.replacingOccurrences(of: "%", with: "")) }
+        return values.max()
+    }
+}
+
+enum InspectSeverity: String, Codable {
+    case ok
+    case warning
+    case danger
+
+    static func of(cpu: Double?, memory: Double?, disk: Double?, error: String?) -> InspectSeverity {
+        if error != nil { return .danger }
+        let peak = max(cpu ?? 0, memory ?? 0, disk ?? 0)
+        if peak >= 90 { return .danger }
+        if peak >= 75 { return .warning }
+        return .ok
+    }
+}
+
+struct InspectRecord: Identifiable, Hashable, Codable {
+    var id: UUID
+    var fetchedAt: Date
+    var cpuPercent: Double?
+    var memoryPercent: Double?
+    var diskPercent: Double?
+    var publicIP: String?
+    var error: String?
+
+    var severity: InspectSeverity {
+        InspectSeverity.of(cpu: cpuPercent, memory: memoryPercent, disk: diskPercent, error: error)
+    }
+
+    static func from(hostID: UUID, metrics: HostMetrics) -> InspectRecord {
+        InspectRecord(
+            id: hostID,
+            fetchedAt: metrics.fetchedAt,
+            cpuPercent: metrics.cpuPercent,
+            memoryPercent: metrics.memoryPercent,
+            diskPercent: metrics.worstDiskPercent,
+            publicIP: metrics.publicIP,
+            error: metrics.error
+        )
+    }
+
+    static func failure(hostID: UUID, message: String) -> InspectRecord {
+        InspectRecord(
+            id: hostID,
+            fetchedAt: Date(),
+            cpuPercent: nil,
+            memoryPercent: nil,
+            diskPercent: nil,
+            publicIP: nil,
+            error: message
+        )
+    }
+}
+
+struct InspectFile: Hashable, Codable {
+    var records: [InspectRecord]
+    var lastRunIDs: [UUID]
 }

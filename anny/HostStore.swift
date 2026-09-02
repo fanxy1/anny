@@ -4,9 +4,12 @@ import Foundation
 @MainActor
 final class HostStore: ObservableObject {
     @Published private(set) var hosts: [WatchedHost] = []
+    @Published private(set) var groups: [HostGroup] = []
+    @Published private(set) var ungroupedCollapsed = false
 
     private var directoryWatcher: DispatchSourceFileSystemObject?
     private var reloadTask: Task<Void, Never>?
+    private var ignoreReloadUntil: Date?
 
     private var fileURL: URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -32,11 +35,18 @@ final class HostStore: ObservableObject {
     }
 
     func load() {
+        if let until = ignoreReloadUntil, Date() < until { return }
         guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([WatchedHost].self, from: data)
+              let decoded = try? WatchlistFile.decode(data)
         else { return }
-        if decoded != hosts {
-            hosts = decoded
+        if decoded.hosts != hosts {
+            hosts = decoded.hosts
+        }
+        if decoded.groups != groups {
+            groups = decoded.groups
+        }
+        if decoded.ungroupedCollapsed != ungroupedCollapsed {
+            ungroupedCollapsed = decoded.ungroupedCollapsed
         }
     }
 
@@ -102,6 +112,92 @@ final class HostStore: ObservableObject {
         save()
     }
 
+    func moveInBucket(groupID: UUID?, from source: IndexSet, to destination: Int) {
+        let idxs = hosts.indices.filter { hosts[$0].groupID == groupID }
+        guard !idxs.isEmpty else { return }
+        var values = idxs.map { hosts[$0] }
+        values.move(fromOffsets: source, toOffset: destination)
+        var next = hosts
+        for (i, idx) in idxs.enumerated() {
+            next[idx] = values[i]
+        }
+        if next != hosts {
+            hosts = next
+            save()
+        }
+    }
+
+    @discardableResult
+    func addGroup(named name: String = "未命名分组") -> HostGroup {
+        let group = HostGroup(name: name)
+        groups.append(group)
+        save()
+        return group
+    }
+
+    func renameGroup(id: UUID, to name: String) {
+        guard let i = groups.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, groups[i].name != trimmed else { return }
+        groups[i].name = trimmed
+        save()
+    }
+
+    func setCollapsed(groupID: UUID?, collapsed: Bool) {
+        if let groupID {
+            guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+            guard groups[i].collapsed != collapsed else { return }
+            groups[i].collapsed = collapsed
+            save()
+            return
+        }
+        guard ungroupedCollapsed != collapsed else { return }
+        ungroupedCollapsed = collapsed
+        save()
+    }
+
+    func toggleCollapsed(groupID: UUID?) {
+        if let groupID {
+            guard let group = groups.first(where: { $0.id == groupID }) else { return }
+            setCollapsed(groupID: groupID, collapsed: !group.collapsed)
+        } else {
+            setCollapsed(groupID: nil, collapsed: !ungroupedCollapsed)
+        }
+    }
+
+    func deleteGroup(id: UUID) {
+        guard groups.contains(where: { $0.id == id }) else { return }
+        for i in hosts.indices where hosts[i].groupID == id {
+            hosts[i].groupID = nil
+        }
+        groups.removeAll { $0.id == id }
+        save()
+    }
+
+    /// `groupID` 为 nil 表示未分组。`before` 为 nil 时加到该组末尾。
+    func moveHost(_ id: UUID, toGroup groupID: UUID?, before neighborID: UUID?) {
+        guard let from = hosts.firstIndex(where: { $0.id == id }) else { return }
+        if let groupID, !groups.contains(where: { $0.id == groupID }) { return }
+        if let neighborID, neighborID == id { return }
+
+        var host = hosts[from]
+        if host.groupID == groupID, neighborID == nil { return }
+
+        host.groupID = groupID
+        hosts.remove(at: from)
+
+        if let neighborID,
+           let insertAt = hosts.firstIndex(where: { $0.id == neighborID }),
+           hosts[insertAt].groupID == groupID {
+            hosts.insert(host, at: insertAt)
+        } else if let last = hosts.lastIndex(where: { $0.groupID == groupID }) {
+            hosts.insert(host, at: hosts.index(after: last))
+        } else {
+            hosts.append(host)
+        }
+        save()
+    }
+
     /// 只删本机监控名单，不调用 tailscale / headscale。
     func removeFromWatchlist(_ host: WatchedHost) {
         HostSecretStore.delete(for: host.id)
@@ -110,7 +206,11 @@ final class HostStore: ObservableObject {
     }
 
     private func save() {
-        let data = try? JSONEncoder().encode(hosts)
+        // 原子写入会触发目录监视；忽略随后这次重读，避免读到旧文件把折叠打回去。
+        ignoreReloadUntil = Date().addingTimeInterval(0.4)
+        let data = try? JSONEncoder().encode(
+            Watchlist(groups: groups, hosts: hosts, ungroupedCollapsed: ungroupedCollapsed)
+        )
         try? data?.write(to: fileURL, options: .atomic)
     }
 
