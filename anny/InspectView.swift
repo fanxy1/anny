@@ -54,6 +54,18 @@ struct InspectView: View {
                 Button("停止") { inspect.cancel() }
                     .annyGlass()
             } else {
+                HStack(spacing: 6) {
+                    Text("线程")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Stepper(value: concurrencyBinding, in: 1...16) {
+                        Text("\(inspect.concurrency)")
+                            .font(.body.monospacedDigit())
+                            .frame(minWidth: 20, alignment: .trailing)
+                    }
+                    .controlSize(.small)
+                    .help("同时巡查几台，1 到 16")
+                }
                 Button("清除勾选") { inspect.clearChecked() }
                     .disabled(inspect.checked.isEmpty)
                     .annyGlass()
@@ -127,6 +139,7 @@ struct InspectView: View {
                                 .frame(width: 72, alignment: .leading)
                             Text(statusText(row))
                                 .foregroundStyle(statusColor(row))
+                                .help(row.record?.error ?? "")
                                 .frame(width: 80, alignment: .leading)
                             timeText(row)
                                 .frame(width: 88, alignment: .leading)
@@ -179,6 +192,13 @@ struct InspectView: View {
         }
         .buttonStyle(.plain)
         .help("按\(title)排序")
+    }
+
+    private var concurrencyBinding: Binding<Int> {
+        Binding(
+            get: { inspect.concurrency },
+            set: { inspect.setConcurrency($0) }
+        )
     }
 
     private func toggleSort(_ key: InspectSort) {

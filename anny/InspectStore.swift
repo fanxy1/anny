@@ -3,6 +3,7 @@ import Foundation
 @MainActor
 final class InspectStore: ObservableObject {
     @Published var checked: Set<UUID> = []
+    @Published var concurrency = 4
     @Published private(set) var records: [UUID: InspectRecord] = [:]
     @Published private(set) var runIDs: [UUID] = []
     @Published private(set) var runningIDs: Set<UUID> = []
@@ -58,6 +59,13 @@ final class InspectStore: ObservableObject {
         checked.removeAll()
     }
 
+    func setConcurrency(_ n: Int) {
+        let next = InspectFile.clampedConcurrency(n)
+        guard next != concurrency else { return }
+        concurrency = next
+        save()
+    }
+
     func forget(_ id: UUID) {
         checked.remove(id)
         records.removeValue(forKey: id)
@@ -90,7 +98,7 @@ final class InspectStore: ObservableObject {
 
         await withTaskGroup(of: (UUID, InspectRecord).self) { group in
             var iterator = hosts.makeIterator()
-            for _ in 0..<min(4, hosts.count) {
+            for _ in 0..<min(concurrency, hosts.count) {
                 if let host = iterator.next() {
                     group.addTask {
                         (host.id, await InspectStore.fetch(host))
@@ -131,12 +139,14 @@ final class InspectStore: ObservableObject {
         else { return }
         records = Dictionary(uniqueKeysWithValues: file.records.map { ($0.id, $0) })
         runIDs = file.lastRunIDs
+        concurrency = file.concurrency
     }
 
     private func save() {
         let file = InspectFile(
             records: Array(records.values),
-            lastRunIDs: runIDs
+            lastRunIDs: runIDs,
+            concurrency: concurrency
         )
         try? JSONEncoder().encode(file).write(to: fileURL, options: .atomic)
     }

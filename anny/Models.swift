@@ -233,4 +233,28 @@ struct InspectRecord: Identifiable, Hashable, Codable {
 struct InspectFile: Hashable, Codable {
     var records: [InspectRecord]
     var lastRunIDs: [UUID]
+    var concurrency: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case records, lastRunIDs, concurrency
+    }
+
+    init(records: [InspectRecord], lastRunIDs: [UUID], concurrency: Int = 4) {
+        self.records = records
+        self.lastRunIDs = lastRunIDs
+        self.concurrency = InspectFile.clampedConcurrency(concurrency)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        records = try c.decode([InspectRecord].self, forKey: .records)
+        lastRunIDs = try c.decode([UUID].self, forKey: .lastRunIDs)
+        concurrency = InspectFile.clampedConcurrency(
+            try c.decodeIfPresent(Int.self, forKey: .concurrency) ?? 4
+        )
+    }
+
+    static func clampedConcurrency(_ n: Int) -> Int {
+        min(16, max(1, n))
+    }
 }
