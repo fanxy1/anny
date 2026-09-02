@@ -3,14 +3,6 @@ import Foundation
 enum SSHService {
     static func fetchMetrics(_ host: WatchedHost) throws -> HostMetrics {
         let script = """
-        wanf="/tmp/anny-wan-$$"
-        (
-          curl -4 -fsS --max-time 2 https://4.ipw.cn ||
-          curl -4 -fsS --max-time 2 https://ip.3322.net ||
-          wget -qO- -T 2 https://4.ipw.cn ||
-          curl -4 -fsS --max-time 2 https://ifconfig.me/ip
-        ) >"$wanf" 2>/dev/null &
-        wanpid=$!
         echo '===LOAD==='
         cat /proc/loadavg
         echo '===MEM==='
@@ -30,10 +22,12 @@ enum SSHService {
         fi
         echo '===UNAME==='
         uname -srm
-        wait "$wanpid" 2>/dev/null
         echo '===WAN==='
-        tr -d '\\r' <"$wanf" 2>/dev/null | grep -Eo '([0-9]{1,3}\\.){3}[0-9]{1,3}' | head -n1
-        rm -f "$wanf"
+        if command -v timeout >/dev/null 2>&1; then
+          timeout 3 sh -c 'curl -4 -fsS --max-time 2 https://4.ipw.cn || curl -4 -fsS --max-time 2 https://ip.3322.net'
+        else
+          curl -4 -fsS --max-time 2 https://4.ipw.cn
+        fi 2>/dev/null | tr -d '\\r' | grep -Eo '([0-9]{1,3}\\.){3}[0-9]{1,3}' | head -n1
         """
 
         let hasPassword = HostSecretStore.hasPassword(for: host.id)
