@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var workspace: Workspace = .machine
     @State private var metrics: HostMetrics?
     @State private var loading = false
+    @State private var liveRefresh = false
+    @State private var liveTask: Task<Void, Never>?
     @State private var actionError: String?
     @State private var showAdd = false
     @State private var editingHost: WatchedHost?
@@ -143,8 +145,14 @@ struct ContentView: View {
         }
         .onChange(of: selectedID) { _, _ in
             searchFocused = false
+            liveRefresh = false
+            stopLiveLoop()
             metrics = nil
             loading = false
+        }
+        .onChange(of: liveRefresh) { _, on in
+            if on { detailPane = .metrics }
+            syncLiveLoop()
         }
     }
 
@@ -596,9 +604,17 @@ struct ContentView: View {
 
             AnnyGlassCluster(spacing: 10) {
                 HStack(spacing: 10) {
+                    Text("动态")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Toggle("动态", isOn: $liveRefresh)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .labelsHidden()
+                        .help("打开后持续刷新 CPU、内存和 Swap，类似 htop")
                     Button("刷新", systemImage: AnnyIcon.refresh) { refresh() }
                         .disabled(loading)
-                        .help("读取 CPU、内存和磁盘")
+                        .help("读取系统、CPU、内存、Swap 和磁盘")
                         .annyGlass()
                     sessionButton(host, state: state)
                 }
@@ -668,11 +684,11 @@ struct ContentView: View {
     private func metricsPane(_ host: WatchedHost) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if loading && metrics == nil {
+                if (loading || liveRefresh) && metrics == nil {
                     HStack(spacing: 10) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("正在读取资源…")
+                        Text(liveRefresh ? "正在动态读取…" : "正在读取资源…")
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -681,7 +697,7 @@ struct ContentView: View {
                     ContentUnavailableView {
                         Label("尚未读取", systemImage: AnnyIcon.metrics)
                     } description: {
-                        Text("点「刷新」读取系统、CPU、内存和磁盘。切换名单不会自动拉取。")
+                        Text("点「刷新」读取系统、CPU、内存、Swap 和磁盘。也可打开「动态」持续刷新。切换名单不会自动拉取。")
                     }
                     .symbolRenderingMode(.hierarchical)
                     .frame(maxWidth: .infinity, minHeight: 240)
@@ -697,7 +713,9 @@ struct ContentView: View {
                 }
 
                 if let m = metrics, m.error == nil {
-                    systemCard(m)
+                    if hasSystemInfo(m) {
+                        systemCard(m)
+                    }
 
                     AnnyGlassCluster(spacing: 12) {
                         HStack(alignment: .top, spacing: 12) {
@@ -714,33 +732,44 @@ struct ContentView: View {
                                 percent: memoryPercent(m),
                                 subtitle: m.load1.map { String(format: "load %.2f", $0) }
                             )
+                            usageCard(
+                                title: "Swap",
+                                icon: AnnyIcon.swap,
+                                value: swapText(m),
+                                percent: swapPercent(m)
+                            )
                         }
                     }
+                    if liveRefresh {
+                        Text("动态刷新中 · CPU / 内存 / Swap")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 8) {
-                            AnnySymbol(name: AnnyIcon.disk)
-                            Text("磁盘")
-                                .font(.headline)
-                            Spacer()
-                            if let at = Optional(m.fetchedAt) {
-                                Text("更新于 \(at.formatted(date: .omitted, time: .standard))")
+                    if !m.disks.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 8) {
+                                AnnySymbol(name: AnnyIcon.disk)
+                                Text("磁盘")
+                                    .font(.headline)
+                                Spacer()
+                                Text("更新于 \(m.fetchedAt.formatted(date: .omitted, time: .standard))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                        }
-                        Table(m.disks) {
-                            TableColumn("挂载") { Text(verbatim: $0.mount).font(.body.monospaced()) }
-                            TableColumn("容量") { Text(verbatim: byteText($0.size)) }
-                            TableColumn("已用") { row in
-                                Text(verbatim: "\(row.percent)  \(byteText(row.used))")
-                                    .foregroundStyle(Theme.usageColor(Theme.diskLevel(row.percent)))
+                            Table(m.disks) {
+                                TableColumn("挂载") { Text(verbatim: $0.mount).font(.body.monospaced()) }
+                                TableColumn("容量") { Text(verbatim: byteText($0.size)) }
+                                TableColumn("已用") { row in
+                                    Text(verbatim: "\(row.percent)  \(byteText(row.used))")
+                                        .foregroundStyle(Theme.usageColor(Theme.diskLevel(row.percent)))
+                                }
+                                TableColumn("可用") { Text(verbatim: byteText($0.avail)) }
                             }
-                            TableColumn("可用") { Text(verbatim: byteText($0.avail)) }
+                            .frame(minHeight: 200)
                         }
-                        .frame(minHeight: 200)
+                        .cardBackground()
                     }
-                    .cardBackground()
                 }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -802,6 +831,8 @@ struct ContentView: View {
 
             Text(verbatim: value)
                 .font(.title2.monospacedDigit().weight(.semibold))
+                .contentTransition(.numericText())
+                .animation(.easeInOut(duration: 0.2), value: value)
             if let subtitle {
                 Text(verbatim: subtitle)
                     .font(.caption)
@@ -809,6 +840,7 @@ struct ContentView: View {
             }
             ProgressView(value: min(max(percent, 0), 100), total: 100)
                 .tint(Theme.usageColor(percent))
+                .animation(.easeInOut(duration: 0.25), value: percent)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardBackground()
@@ -832,11 +864,6 @@ struct ContentView: View {
                 result = m
             } catch {
                 result = HostMetrics(
-                    cpuPercent: nil,
-                    load1: nil,
-                    memTotal: nil,
-                    memAvailable: nil,
-                    disks: [],
                     fetchedAt: Date(),
                     error: error.localizedDescription
                 )
@@ -848,6 +875,92 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var liveLoopActive: Bool {
+        liveRefresh && workspace == .machine && detailPane == .metrics && !loading && selected != nil
+    }
+
+    private func syncLiveLoop() {
+        stopLiveLoop()
+        guard liveRefresh, let host = selected else { return }
+        let hostID = host.id
+        liveTask = Task { await runLiveLoop(hostID: hostID) }
+    }
+
+    private func stopLiveLoop() {
+        liveTask?.cancel()
+        liveTask = nil
+    }
+
+    private func runLiveLoop(hostID: UUID) async {
+        while !Task.isCancelled {
+            let round: (WatchedHost, [Int64]?)? = await MainActor.run {
+                guard liveLoopActive, selectedID == hostID,
+                      let host = store.hosts.first(where: { $0.id == hostID })
+                else { return nil }
+                return (host, metrics?.cpuTicks)
+            }
+            if Task.isCancelled { break }
+
+            if let (host, previousTicks) = round {
+                let sampleCPU = previousTicks == nil
+                let started = Date()
+                let result = await Task.detached {
+                    Result { try SSHService.fetchLive(host, sampleCPU: sampleCPU) }
+                }.value
+                if Task.isCancelled { break }
+                await MainActor.run {
+                    guard selectedID == hostID, liveRefresh else { return }
+                    switch result {
+                    case .success(let live):
+                        applyLive(live, previousTicks: previousTicks)
+                    case .failure(let error):
+                        if metrics == nil {
+                            metrics = HostMetrics(
+                                fetchedAt: Date(),
+                                error: error.localizedDescription
+                            )
+                        }
+                    }
+                }
+                let elapsed = Date().timeIntervalSince(started)
+                let wait = max(0.15, 1.0 - elapsed)
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            } else {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+    private func applyLive(_ live: LiveMetrics, previousTicks: [Int64]?) {
+        var m = metrics ?? HostMetrics(fetchedAt: Date())
+        m.memTotal = live.memTotal ?? m.memTotal
+        m.memAvailable = live.memAvailable ?? m.memAvailable
+        m.swapTotal = live.swapTotal ?? m.swapTotal
+        m.swapFree = live.swapFree ?? m.swapFree
+        if let load1 = live.load1 {
+            m.load1 = load1
+        }
+        if let pct = live.cpuPercent {
+            m.cpuPercent = pct
+        } else if let previousTicks, let pct = SSHService.cpuPercent(previousTicks, live.cpuTicks) {
+            m.cpuPercent = pct
+        }
+        if !live.cpuTicks.isEmpty {
+            m.cpuTicks = live.cpuTicks
+        }
+        m.error = nil
+        metrics = m
+    }
+
+    private func hasSystemInfo(_ m: HostMetrics) -> Bool {
+        let ip = m.publicIP?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !ip.isEmpty
+            || !(m.osPretty ?? "").isEmpty
+            || !(m.osName ?? "").isEmpty
+            || !(m.osVersion ?? "").isEmpty
+            || !(m.kernel ?? "").isEmpty
     }
 
     private func openTerminal(_ host: WatchedHost) {
@@ -891,6 +1004,17 @@ struct ContentView: View {
 
     private func memoryText(_ m: HostMetrics) -> String {
         guard let total = m.memTotal, let used = m.memUsed else { return "—" }
+        return "\(byteText(used)) / \(byteText(total))"
+    }
+
+    private func swapPercent(_ m: HostMetrics) -> Double {
+        m.swapPercent ?? 0
+    }
+
+    private func swapText(_ m: HostMetrics) -> String {
+        guard let total = m.swapTotal else { return "—" }
+        if total == 0 { return "未启用" }
+        guard let used = m.swapUsed else { return "—" }
         return "\(byteText(used)) / \(byteText(total))"
     }
 

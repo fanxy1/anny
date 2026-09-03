@@ -23,6 +23,7 @@ enum AnnyIcon {
     static let disconnect = "xmark"
     static let cpu = "cpu"
     static let memory = "memorychip"
+    static let swap = "arrow.triangle.swap"
     static let disk = "internaldrive"
     static let network = "network"
     static let fetch = "arrow.down.circle"

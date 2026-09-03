@@ -148,19 +148,32 @@ struct DiskRow: Identifiable, Hashable {
     var mount: String
 }
 
-struct HostMetrics: Hashable {
+struct LiveMetrics: Hashable {
     var cpuPercent: Double?
+    var cpuTicks: [Int64]
     var load1: Double?
     var memTotal: Int64?
     var memAvailable: Int64?
-    var disks: [DiskRow]
+    var swapTotal: Int64?
+    var swapFree: Int64?
+}
+
+struct HostMetrics: Hashable {
+    var cpuPercent: Double? = nil
+    var cpuTicks: [Int64]? = nil
+    var load1: Double? = nil
+    var memTotal: Int64? = nil
+    var memAvailable: Int64? = nil
+    var swapTotal: Int64? = nil
+    var swapFree: Int64? = nil
+    var disks: [DiskRow] = []
     var osPretty: String? = nil
     var osName: String? = nil
     var osVersion: String? = nil
     var kernel: String? = nil
     var publicIP: String? = nil
     var fetchedAt: Date
-    var error: String?
+    var error: String? = nil
 
     var memUsed: Int64? {
         guard let total = memTotal, let avail = memAvailable else { return nil }
@@ -169,6 +182,16 @@ struct HostMetrics: Hashable {
 
     var memoryPercent: Double? {
         guard let total = memTotal, let used = memUsed, total > 0 else { return nil }
+        return Double(used) / Double(total) * 100
+    }
+
+    var swapUsed: Int64? {
+        guard let total = swapTotal, let free = swapFree else { return nil }
+        return max(0, total - free)
+    }
+
+    var swapPercent: Double? {
+        guard let total = swapTotal, let used = swapUsed, total > 0 else { return nil }
         return Double(used) / Double(total) * 100
     }
 
