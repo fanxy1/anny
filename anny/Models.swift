@@ -151,6 +151,8 @@ struct DiskRow: Identifiable, Hashable {
 struct LiveMetrics: Hashable {
     var cpuPercent: Double?
     var cpuTicks: [Int64]
+    var cpuCores: Int?
+    var cpuThreads: Int?
     var load1: Double?
     var memTotal: Int64?
     var memAvailable: Int64?
@@ -161,6 +163,8 @@ struct LiveMetrics: Hashable {
 struct HostMetrics: Hashable {
     var cpuPercent: Double? = nil
     var cpuTicks: [Int64]? = nil
+    var cpuCores: Int? = nil
+    var cpuThreads: Int? = nil
     var load1: Double? = nil
     var memTotal: Int64? = nil
     var memAvailable: Int64? = nil
@@ -198,6 +202,59 @@ struct HostMetrics: Hashable {
     var worstDiskPercent: Double? {
         let values = disks.compactMap { Double($0.percent.replacingOccurrences(of: "%", with: "")) }
         return values.max()
+    }
+
+    var cpuTopologyText: String? {
+        switch (cpuCores, cpuThreads) {
+        case let (cores?, threads?) where cores > 0 && threads > 0:
+            return "\(cores) 核 / \(threads) 线程"
+        case let (cores?, _) where cores > 0:
+            return "\(cores) 核"
+        case let (_, threads?) where threads > 0:
+            return "\(threads) 线程"
+        default:
+            return nil
+        }
+    }
+}
+
+struct ProcessRow: Identifiable, Hashable {
+    var pid: Int
+    var user: String
+    var cpuPercent: Double
+    var memPercent: Double
+    var rssBytes: Int64
+    var command: String
+    var ticks: Int64?
+
+    var id: Int { pid }
+
+    var isKernel: Bool {
+        command.hasPrefix("[") && command.hasSuffix("]")
+    }
+
+    func matches(_ query: String) -> Bool {
+        let terms = query
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        if terms.isEmpty { return true }
+        let hay = "\(pid) \(user) \(command)".lowercased()
+        return terms.contains { hay.contains($0) }
+    }
+}
+
+struct ProcessSnapshot: Hashable {
+    var rows: [ProcessRow] = []
+    var clkTck: Double = 100
+    var memTotalKB: Int64? = nil
+    var fetchedAt: Date
+    var error: String? = nil
+
+    var tickMap: [Int: Int64] {
+        Dictionary(uniqueKeysWithValues: rows.compactMap { row in
+            row.ticks.map { (row.pid, $0) }
+        })
     }
 }
 

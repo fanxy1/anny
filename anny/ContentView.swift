@@ -7,7 +7,10 @@ struct ContentView: View {
     @State private var selectedID: UUID?
     @State private var workspace: Workspace = .machine
     @State private var metrics: HostMetrics?
+    @State private var processSnapshot: ProcessSnapshot?
     @State private var loading = false
+    @State private var processesLoading = false
+    @State private var killingPID: Int?
     @State private var liveRefresh = false
     @State private var liveTask: Task<Void, Never>?
     @State private var actionError: String?
@@ -20,6 +23,7 @@ struct ContentView: View {
     @State private var sidebarWidth: CGFloat = 220
     @State private var hostSearch = ""
     @FocusState private var searchFocused: Bool
+    @FocusState private var processSearchFocused: Bool
     @State private var renamingGroupID: UUID?
     @State private var renameDraft = ""
     @FocusState private var renameFocused: Bool
@@ -33,6 +37,7 @@ struct ContentView: View {
 
     private enum DetailPane: Hashable {
         case metrics
+        case processes
         case terminal
     }
 
@@ -121,12 +126,19 @@ struct ContentView: View {
             EditHostSheet(host: host) { connectionChanged in
                 if connectionChanged, selectedID == host.id {
                     metrics = nil
+                    processSnapshot = nil
                 }
             }
             .environmentObject(store)
         }
         .background {
-            Button("搜索") { searchFocused = true }
+            Button("搜索") {
+                if workspace == .machine && detailPane == .processes {
+                    processSearchFocused = true
+                } else {
+                    searchFocused = true
+                }
+            }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
         }
@@ -145,13 +157,22 @@ struct ContentView: View {
         }
         .onChange(of: selectedID) { _, _ in
             searchFocused = false
+            processSearchFocused = false
             liveRefresh = false
             stopLiveLoop()
             metrics = nil
+            processSnapshot = nil
             loading = false
+            processesLoading = false
+            killingPID = nil
         }
-        .onChange(of: liveRefresh) { _, on in
-            if on { detailPane = .metrics }
+        .onChange(of: liveRefresh) { _, _ in
+            syncLiveLoop()
+        }
+        .onChange(of: detailPane) { _, pane in
+            if pane == .processes {
+                ensureProcesses()
+            }
             syncLiveLoop()
         }
     }
@@ -512,6 +533,18 @@ struct ContentView: View {
                 metricsPane(host)
                     .opacity(detailPane == .metrics ? 1 : 0)
                     .allowsHitTesting(detailPane == .metrics)
+                ProcessPane(
+                    hostID: host.id,
+                    snapshot: processSnapshot,
+                    loading: processesLoading,
+                    live: liveRefresh,
+                    killingPID: killingPID,
+                    searchFocused: $processSearchFocused,
+                    onRefresh: refreshProcesses,
+                    onKill: killProcess
+                )
+                .opacity(detailPane == .processes ? 1 : 0)
+                .allowsHitTesting(detailPane == .processes)
             } else {
                 emptySelection
             }
@@ -595,12 +628,13 @@ struct ContentView: View {
 
             Picker("面板", selection: $detailPane) {
                 Text("资源").tag(DetailPane.metrics)
+                Text("进程").tag(DetailPane.processes)
                 Text("终端").tag(DetailPane.terminal)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 148)
-            .help("查看资源或打开终端")
+            .frame(width: 216)
+            .help("查看资源、进程或终端")
 
             AnnyGlassCluster(spacing: 10) {
                 HStack(spacing: 10) {
@@ -611,10 +645,14 @@ struct ContentView: View {
                         .toggleStyle(.switch)
                         .controlSize(.small)
                         .labelsHidden()
-                        .help("打开后持续刷新 CPU、内存和 Swap，类似 htop")
-                    Button("刷新", systemImage: AnnyIcon.refresh) { refresh() }
-                        .disabled(loading)
-                        .help("读取系统、CPU、内存、Swap 和磁盘")
+                        .help(detailPane == .processes
+                              ? "打开后持续刷新进程 CPU 和内存"
+                              : "打开后持续刷新 CPU、内存和 Swap")
+                    Button("刷新", systemImage: AnnyIcon.refresh) { refreshCurrentPane() }
+                        .disabled(refreshDisabled)
+                        .help(detailPane == .processes
+                              ? "读取进程列表"
+                              : "读取系统、CPU、内存、Swap 和磁盘")
                         .annyGlass()
                     sessionButton(host, state: state)
                 }
@@ -723,7 +761,8 @@ struct ContentView: View {
                                 title: "CPU",
                                 icon: AnnyIcon.cpu,
                                 value: m.cpuPercent.map { String(format: "%.0f%%", $0) } ?? "—",
-                                percent: m.cpuPercent ?? 0
+                                percent: m.cpuPercent ?? 0,
+                                subtitle: m.cpuTopologyText
                             )
                             usageCard(
                                 title: "内存",
@@ -831,13 +870,17 @@ struct ContentView: View {
 
             Text(verbatim: value)
                 .font(.title2.monospacedDigit().weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .contentTransition(.numericText())
                 .animation(.easeInOut(duration: 0.2), value: value)
-            if let subtitle {
-                Text(verbatim: subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(verbatim: subtitle ?? " ")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .opacity(subtitle == nil ? 0 : 1)
+                .frame(maxWidth: .infinity, alignment: .leading)
             ProgressView(value: min(max(percent, 0), 100), total: 100)
                 .tint(Theme.usageColor(percent))
                 .animation(.easeInOut(duration: 0.25), value: percent)
@@ -877,8 +920,86 @@ struct ContentView: View {
         }
     }
 
+    private func ensureProcesses() {
+        guard processSnapshot == nil, !processesLoading, !liveRefresh else { return }
+        refreshProcesses()
+    }
+
+    private func refreshProcesses() {
+        guard let host = selected else { return }
+        processesLoading = true
+        let snapshot = host
+        let previous = processSnapshot
+        Task.detached {
+            let result: ProcessSnapshot
+            do {
+                var s = try SSHService.fetchProcesses(snapshot, previous: previous)
+                s.error = s.rows.isEmpty ? (s.error ?? "没有读到进程") : nil
+                result = s
+            } catch {
+                result = ProcessSnapshot(fetchedAt: Date(), error: error.localizedDescription)
+            }
+            await MainActor.run {
+                if selectedID == snapshot.id {
+                    processSnapshot = result
+                    processesLoading = false
+                }
+            }
+        }
+    }
+
+    private func killProcess(_ row: ProcessRow) {
+        guard let host = selected else { return }
+        killingPID = row.pid
+        let snapshot = host
+        Task.detached {
+            let errorText: String?
+            do {
+                try SSHService.killProcess(snapshot, pid: row.pid)
+                errorText = nil
+            } catch {
+                errorText = error.localizedDescription
+            }
+            await MainActor.run {
+                guard selectedID == snapshot.id else { return }
+                killingPID = nil
+                if let errorText {
+                    actionError = errorText
+                } else {
+                    refreshProcesses()
+                }
+            }
+        }
+    }
+
     private var liveLoopActive: Bool {
-        liveRefresh && workspace == .machine && detailPane == .metrics && !loading && selected != nil
+        guard liveRefresh, workspace == .machine, selected != nil else { return false }
+        switch detailPane {
+        case .metrics:
+            return !loading
+        case .processes:
+            return !processesLoading
+        case .terminal:
+            return false
+        }
+    }
+
+    private var refreshDisabled: Bool {
+        switch detailPane {
+        case .metrics, .terminal:
+            return loading
+        case .processes:
+            return processesLoading
+        }
+    }
+
+    private func refreshCurrentPane() {
+        switch detailPane {
+        case .metrics, .terminal:
+            refresh()
+        case .processes:
+            refreshProcesses()
+        }
     }
 
     private func syncLiveLoop() {
@@ -893,37 +1014,70 @@ struct ContentView: View {
         liveTask = nil
     }
 
+    private enum LiveRound {
+        case metrics(WatchedHost, [Int64]?)
+        case processes(WatchedHost, ProcessSnapshot?)
+    }
+
     private func runLiveLoop(hostID: UUID) async {
         while !Task.isCancelled {
-            let round: (WatchedHost, [Int64]?)? = await MainActor.run {
+            let round: LiveRound? = await MainActor.run {
                 guard liveLoopActive, selectedID == hostID,
                       let host = store.hosts.first(where: { $0.id == hostID })
                 else { return nil }
-                return (host, metrics?.cpuTicks)
+                switch detailPane {
+                case .processes:
+                    return .processes(host, processSnapshot)
+                case .metrics:
+                    return .metrics(host, metrics?.cpuTicks)
+                case .terminal:
+                    return nil
+                }
             }
             if Task.isCancelled { break }
 
-            if let (host, previousTicks) = round {
-                let sampleCPU = previousTicks == nil
+            if let round {
                 let started = Date()
-                let result = await Task.detached {
-                    Result { try SSHService.fetchLive(host, sampleCPU: sampleCPU) }
-                }.value
-                if Task.isCancelled { break }
-                await MainActor.run {
-                    guard selectedID == hostID, liveRefresh else { return }
-                    switch result {
-                    case .success(let live):
-                        applyLive(live, previousTicks: previousTicks)
-                    case .failure(let error):
-                        if metrics == nil {
-                            metrics = HostMetrics(
-                                fetchedAt: Date(),
-                                error: error.localizedDescription
-                            )
+                switch round {
+                case .metrics(let host, let previousTicks):
+                    let sampleCPU = previousTicks == nil
+                    let result = await Task.detached {
+                        Result { try SSHService.fetchLive(host, sampleCPU: sampleCPU) }
+                    }.value
+                    await MainActor.run {
+                        guard !Task.isCancelled, selectedID == hostID, liveRefresh, detailPane == .metrics else { return }
+                        switch result {
+                        case .success(let live):
+                            applyLive(live, previousTicks: previousTicks)
+                        case .failure(let error):
+                            if metrics == nil {
+                                metrics = HostMetrics(
+                                    fetchedAt: Date(),
+                                    error: error.localizedDescription
+                                )
+                            }
+                        }
+                    }
+                case .processes(let host, let previous):
+                    let result = await Task.detached {
+                        Result { try SSHService.fetchProcesses(host, previous: previous) }
+                    }.value
+                    await MainActor.run {
+                        guard !Task.isCancelled, selectedID == hostID, liveRefresh, detailPane == .processes else { return }
+                        switch result {
+                        case .success(let snapshot):
+                            processSnapshot = snapshot
+                        case .failure(let error):
+                            if processSnapshot == nil {
+                                processSnapshot = ProcessSnapshot(
+                                    fetchedAt: Date(),
+                                    error: error.localizedDescription
+                                )
+                            }
                         }
                     }
                 }
+                if Task.isCancelled { break }
                 let elapsed = Date().timeIntervalSince(started)
                 let wait = max(0.15, 1.0 - elapsed)
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
@@ -941,6 +1095,12 @@ struct ContentView: View {
         m.swapFree = live.swapFree ?? m.swapFree
         if let load1 = live.load1 {
             m.load1 = load1
+        }
+        if let cores = live.cpuCores {
+            m.cpuCores = cores
+        }
+        if let threads = live.cpuThreads {
+            m.cpuThreads = threads
         }
         if let pct = live.cpuPercent {
             m.cpuPercent = pct

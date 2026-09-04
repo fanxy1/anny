@@ -36,6 +36,9 @@ enum AnnyIcon {
     static let distro = "square.stack"
     static let version = "number"
     static let kernel = "gearshape"
+    static let processes = "list.bullet.rectangle"
+    static let pin = "pin"
+    static let pinFill = "pin.fill"
 }
 
 enum Theme {
