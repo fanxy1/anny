@@ -39,6 +39,7 @@ enum AnnyIcon {
     static let processes = "list.bullet.rectangle"
     static let pin = "pin"
     static let pinFill = "pin.fill"
+    static let probe = "dot.radiowaves.left.and.right"
 }
 
 enum Theme {

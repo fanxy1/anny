@@ -258,6 +258,74 @@ struct ProcessSnapshot: Hashable {
     }
 }
 
+struct NicRow: Identifiable, Hashable {
+    var name: String
+    var up: Bool
+    var mac: String
+    var mtu: Int?
+    var ipv4: [String]
+    var ipv6: [String]
+
+    var id: String { name }
+
+    var addressText: String {
+        let v4 = ipv4
+        let v6 = ipv6.filter { !$0.hasPrefix("fe80:") && !$0.hasPrefix("fe80/") }
+        let parts = v4 + v6
+        return parts.isEmpty ? "—" : parts.joined(separator: "  ")
+    }
+}
+
+struct OverlayNetwork: Identifiable, Hashable {
+    var name: String
+    var scope: String
+    var driver: String
+    var address: String
+    var extra: String
+
+    var id: String { "\(scope)-\(name)-\(address)-\(extra)" }
+
+    var dest: String? {
+        let t = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty || t == "—" ? nil : t
+    }
+}
+
+struct ProbeRow: Identifiable, Hashable {
+    var label: String
+    var dest: String
+    var scope: String
+    var ok: Bool
+    var ms: Double?
+    var method: String
+    var detail: String
+
+    var id: String { "\(scope)-\(label)-\(dest)" }
+
+    var resultText: String {
+        if ok {
+            if let ms {
+                return String(format: "通  %.1f ms", ms)
+            }
+            return method.isEmpty ? "通" : "通  \(method)"
+        }
+        return detail.isEmpty ? "不通" : detail
+    }
+}
+
+struct NetworkSnapshot: Hashable {
+    var nics: [NicRow] = []
+    var gateway: String? = nil
+    var gatewayDev: String? = nil
+    var dns: [String] = []
+    var docker: [OverlayNetwork] = []
+    var k8s: [OverlayNetwork] = []
+    var dockerAvailable: Bool = false
+    var k8sAvailable: Bool = false
+    var fetchedAt: Date
+    var error: String? = nil
+}
+
 enum InspectSeverity: String, Codable {
     case ok
     case warning

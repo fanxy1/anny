@@ -23,6 +23,26 @@ enum SSHService {
         _ = try runSSH(host, script: "kill -TERM \(pid)", timeout: 8)
     }
 
+    static func fetchNetwork(_ host: WatchedHost) throws -> NetworkSnapshot {
+        parseNetworkSnapshot(try runSSH(host, script: networkScript, timeout: 14))
+    }
+
+    static func probeNetwork(_ host: WatchedHost, target: String) throws -> [ProbeRow] {
+        let cleaned = sanitizedProbeTarget(target)
+        if !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, cleaned == nil {
+            throw NSError(domain: "anny", code: 5, userInfo: [NSLocalizedDescriptionKey: "请输入合法的 IP 或域名"])
+        }
+        return parseProbeRows(try runSSH(host, script: probeScript(target: cleaned), timeout: 16))
+    }
+
+    static func sanitizedProbeTarget(_ raw: String) -> String? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.count <= 253 else { return nil }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-:_[]"))
+        guard t.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return t
+    }
+
     static func instantCPUPercent(previous: Int64, current: Int64, clkTck: Double, elapsed: TimeInterval) -> Double? {
         guard clkTck > 0, elapsed > 0.05, current >= previous else { return nil }
         return Double(current - previous) / clkTck / elapsed * 100
@@ -92,6 +112,102 @@ enum SSHService {
           printf "%s\\t%s\\t%s\\n", pid, f[12], f[13]
         }'
         """
+
+    private static let networkScript = """
+        echo '===LINK==='
+        ip -o link show 2>/dev/null
+        echo '===ADDR4==='
+        ip -o -4 addr show 2>/dev/null
+        echo '===ADDR6==='
+        ip -o -6 addr show 2>/dev/null
+        echo '===ROUTE==='
+        ip -4 route show default 2>/dev/null
+        echo '===DNS==='
+        grep '^nameserver' /etc/resolv.conf 2>/dev/null
+        echo '===DOCKER==='
+        if command -v docker >/dev/null 2>&1 && docker network ls >/dev/null 2>&1; then
+          echo available
+          docker network ls --format '{{.Name}}' 2>/dev/null | head -n 12 | while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            docker network inspect "$n" --format '{{.Name}}\t{{.Driver}}\t{{range .IPAM.Config}}{{.Gateway}}{{end}}\t{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null
+          done
+        else
+          echo missing
+        fi
+        echo '===K8S==='
+        if command -v kubectl >/dev/null 2>&1; then
+          if kubectl get --raw=/readyz --request-timeout=2s >/dev/null 2>&1 || kubectl get ns --request-timeout=2s >/dev/null 2>&1; then
+            echo available
+            kubectl get svc -A --request-timeout=3s --no-headers 2>/dev/null | awk '{
+              ip=$4
+              if (ip == "<none>" || ip == "None" || ip == "") next
+              score=0
+              if ($2 == "kubernetes") score=2
+              if ($2 ~ /dns/) score=1
+              printf "%d\\t%s\\t%s\\t%s\\t%s\\t%s\\n", score, $1, $2, $3, ip, $5
+            }' | sort -nr | head -n 12 | cut -f2-
+          else
+            echo missing
+          fi
+        else
+          echo missing
+        fi
+        """
+
+    private static func probeScript(target: String?) -> String {
+        let targetLine = target.map { "TARGET='\($0)'" } ?? "TARGET=''"
+        return """
+        \(targetLine)
+        echo '===PROBE==='
+        probe() {
+          label=$1
+          dest=$2
+          scope=$3
+          [ -n "$dest" ] || return 0
+          if out=$(ping -c 1 -W 2 "$dest" 2>&1); then
+            ms=$(printf '%s\\n' "$out" | sed -n 's/.*time[=<]\\([0-9.]*\\).*/\\1/p' | head -n1)
+            printf '%s\\t%s\\t%s\\tok\\t%s\\tping\\t\\n' "$label" "$dest" "$scope" "${ms:-0}"
+            return 0
+          fi
+          if command -v timeout >/dev/null 2>&1; then
+            if timeout 2 bash -c "echo >/dev/tcp/$dest/443" 2>/dev/null; then
+              printf '%s\\t%s\\t%s\\tok\\t\\ttcp443\\t\\n' "$label" "$dest" "$scope"
+              return 0
+            fi
+            if timeout 2 bash -c "echo >/dev/tcp/$dest/80" 2>/dev/null; then
+              printf '%s\\t%s\\t%s\\tok\\t\\ttcp80\\t\\n' "$label" "$dest" "$scope"
+              return 0
+            fi
+          fi
+          printf '%s\\t%s\\t%s\\tfail\\t\\t\\t不通\\n' "$label" "$dest" "$scope"
+        }
+        gw=$(ip -4 route show default 2>/dev/null | awk '/via/ {print $3; exit}')
+        dns=$(grep '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2; exit}')
+        [ -n "$TARGET" ] && probe 目标 "$TARGET" host &
+        [ -n "$gw" ] && probe 网关 "$gw" host &
+        [ -n "$dns" ] && probe DNS "$dns" host &
+        if command -v docker >/dev/null 2>&1 && docker network ls >/dev/null 2>&1; then
+          docker network ls --format '{{.Name}}' 2>/dev/null | head -n 8 | while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            g=$(docker network inspect "$n" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)
+            [ -n "$g" ] && probe "$n" "$g" docker
+          done &
+        fi
+        if command -v kubectl >/dev/null 2>&1; then
+          kubectl get svc -A --request-timeout=3s --no-headers 2>/dev/null | awk '{
+            ip=$4
+            if (ip == "<none>" || ip == "None" || ip == "") next
+            score=0
+            if ($2 == "kubernetes") score=2
+            if ($2 ~ /dns/) score=1
+            printf "%d\\t%s\\t%s\\n", score, $2, ip
+          }' | sort -nr | head -n 8 | while IFS=$(printf '\\t') read -r _ name ip; do
+            [ -n "$ip" ] && probe "$name" "$ip" k8s
+          done &
+        fi
+        wait
+        """
+    }
 
     private static var metricsScript: String {
         """
@@ -435,6 +551,208 @@ enum SSHService {
             memAvailable: memAvail,
             swapTotal: swapTotal,
             swapFree: swapFree
+        )
+    }
+
+    static func parseNetworkSnapshot(_ raw: String) -> NetworkSnapshot {
+        var nics: [String: NicRow] = [:]
+        var gateway: String?
+        var gatewayDev: String?
+        var dns: [String] = []
+        var docker: [OverlayNetwork] = []
+        var k8s: [OverlayNetwork] = []
+        var dockerAvailable = false
+        var k8sAvailable = false
+        var section = ""
+
+        for line in raw.split(whereSeparator: \.isNewline).map(String.init) {
+            if line.hasPrefix("===") {
+                section = line
+                continue
+            }
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { continue }
+            switch section {
+            case "===LINK===":
+                if let nic = parseLinkLine(t) {
+                    nics[nic.name] = nic
+                }
+            case "===ADDR4===":
+                if let (name, addr) = parseAddrLine(t, family: "inet") {
+                    var nic = nics[name] ?? NicRow(name: name, up: true, mac: "", mtu: nil, ipv4: [], ipv6: [])
+                    if !nic.ipv4.contains(addr) { nic.ipv4.append(addr) }
+                    nics[name] = nic
+                }
+            case "===ADDR6===":
+                if let (name, addr) = parseAddrLine(t, family: "inet6") {
+                    var nic = nics[name] ?? NicRow(name: name, up: true, mac: "", mtu: nil, ipv4: [], ipv6: [])
+                    if !nic.ipv6.contains(addr) { nic.ipv6.append(addr) }
+                    nics[name] = nic
+                }
+            case "===ROUTE===":
+                if let parsed = parseDefaultRoute(t) {
+                    if gateway == nil { gateway = parsed.via }
+                    if gatewayDev == nil { gatewayDev = parsed.dev }
+                }
+            case "===DNS===":
+                if let ip = parseNameserver(t), !dns.contains(ip) { dns.append(ip) }
+            case "===DOCKER===":
+                if t == "available" { dockerAvailable = true }
+                else if t != "missing", let net = parseOverlayLine(t, scope: "docker") {
+                    docker.append(net)
+                }
+            case "===K8S===":
+                if t == "available" { k8sAvailable = true }
+                else if t != "missing", let net = parseK8sLine(t) {
+                    k8s.append(net)
+                }
+            default:
+                break
+            }
+        }
+
+        let rows = nics.values
+            .filter { $0.up || !$0.ipv4.isEmpty || !$0.ipv6.isEmpty }
+            .sorted { lhs, rhs in
+                if lhs.up != rhs.up { return lhs.up && !rhs.up }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+
+        return NetworkSnapshot(
+            nics: rows,
+            gateway: gateway,
+            gatewayDev: gatewayDev,
+            dns: dns,
+            docker: docker,
+            k8s: k8s,
+            dockerAvailable: dockerAvailable,
+            k8sAvailable: k8sAvailable,
+            fetchedAt: Date(),
+            error: rows.isEmpty ? "没有读到网卡" : nil
+        )
+    }
+
+    static func parseLinkLine(_ line: String) -> NicRow? {
+        guard let first = line.firstIndex(of: ":") else { return nil }
+        let afterIndex = line[line.index(after: first)...].drop(while: { $0 == " " })
+        guard let second = afterIndex.firstIndex(of: ":") else { return nil }
+        var name = String(afterIndex[..<second])
+        if let at = name.firstIndex(of: "@") {
+            name = String(name[..<at])
+        }
+        guard !name.isEmpty else { return nil }
+        let rest = String(afterIndex[second...])
+        let up = rest.contains(",UP") || rest.contains("state UP")
+        var mtu: Int?
+        if let range = rest.range(of: "mtu ") {
+            let tail = rest[range.upperBound...]
+            mtu = Int(tail.prefix(while: { $0.isNumber }))
+        }
+        var mac = ""
+        if let range = rest.range(of: "link/ether ") {
+            let tail = rest[range.upperBound...]
+            mac = String(tail.prefix(while: { !$0.isWhitespace }))
+        }
+        return NicRow(name: name, up: up, mac: mac, mtu: mtu, ipv4: [], ipv6: [])
+    }
+
+    static func parseAddrLine(_ line: String, family: String) -> (String, String)? {
+        let cols = line.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let fam = cols.firstIndex(of: family), fam + 1 < cols.count, fam >= 1 else { return nil }
+        var name = cols[1]
+        if name.hasSuffix(":") { name.removeLast() }
+        if let at = name.firstIndex(of: "@") {
+            name = String(name[..<at])
+        }
+        let addr = cols[fam + 1]
+        guard !name.isEmpty, !addr.isEmpty else { return nil }
+        return (name, addr)
+    }
+
+    static func parseDefaultRoute(_ line: String) -> (via: String, dev: String?)? {
+        let cols = line.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard cols.first == "default" else { return nil }
+        var via: String?
+        var dev: String?
+        if let i = cols.firstIndex(of: "via"), i + 1 < cols.count { via = cols[i + 1] }
+        if let i = cols.firstIndex(of: "dev"), i + 1 < cols.count { dev = cols[i + 1] }
+        guard let via else { return nil }
+        return (via, dev)
+    }
+
+    static func parseNameserver(_ line: String) -> String? {
+        let cols = line.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard cols.first == "nameserver", cols.count >= 2 else { return nil }
+        return cols[1]
+    }
+
+    static func parseOverlayLine(_ line: String, scope: String) -> OverlayNetwork? {
+        let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 2, !parts[0].isEmpty else { return nil }
+        let gateway = parts.count > 2 ? parts[2] : ""
+        let subnet = parts.count > 3 ? parts[3] : ""
+        return OverlayNetwork(
+            name: parts[0],
+            scope: scope,
+            driver: parts[1],
+            address: gateway.isEmpty ? "—" : gateway,
+            extra: subnet
+        )
+    }
+
+    static func parseK8sLine(_ line: String) -> OverlayNetwork? {
+        let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 4 else { return nil }
+        let ns = parts[0]
+        let name = parts[1]
+        let type = parts[2]
+        let ip = parts[3]
+        let ports = parts.count > 4 ? parts[4] : ""
+        guard !name.isEmpty, !ip.isEmpty else { return nil }
+        return OverlayNetwork(
+            name: name,
+            scope: "k8s",
+            driver: type,
+            address: ip,
+            extra: [ns, ports].filter { !$0.isEmpty }.joined(separator: " · ")
+        )
+    }
+
+    static func parseProbeRows(_ raw: String) -> [ProbeRow] {
+        var rows: [ProbeRow] = []
+        var section = ""
+        for line in raw.split(whereSeparator: \.isNewline).map(String.init) {
+            if line.hasPrefix("===") {
+                section = line
+                continue
+            }
+            guard section == "===PROBE===" else { continue }
+            if let row = parseProbeLine(line) {
+                rows.append(row)
+            }
+        }
+        return rows
+    }
+
+    static func parseProbeLine(_ line: String) -> ProbeRow? {
+        let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 4 else { return nil }
+        let label = parts[0]
+        let dest = parts[1]
+        let scope = parts[2]
+        let ok = parts[3] == "ok"
+        let ms = parts.count > 4 ? Double(parts[4]) : nil
+        let method = parts.count > 5 ? parts[5] : ""
+        let detail = parts.count > 6 ? parts[6] : ""
+        guard !label.isEmpty, !dest.isEmpty else { return nil }
+        return ProbeRow(
+            label: label,
+            dest: dest,
+            scope: scope,
+            ok: ok,
+            ms: ms,
+            method: method,
+            detail: detail
         )
     }
 

@@ -8,8 +8,12 @@ struct ContentView: View {
     @State private var workspace: Workspace = .machine
     @State private var metrics: HostMetrics?
     @State private var processSnapshot: ProcessSnapshot?
+    @State private var networkSnapshot: NetworkSnapshot?
+    @State private var probeResults: [ProbeRow] = []
     @State private var loading = false
     @State private var processesLoading = false
+    @State private var networkLoading = false
+    @State private var probing = false
     @State private var killingPID: Int?
     @State private var liveRefresh = false
     @State private var liveTask: Task<Void, Never>?
@@ -24,6 +28,7 @@ struct ContentView: View {
     @State private var hostSearch = ""
     @FocusState private var searchFocused: Bool
     @FocusState private var processSearchFocused: Bool
+    @FocusState private var networkProbeFocused: Bool
     @State private var renamingGroupID: UUID?
     @State private var renameDraft = ""
     @FocusState private var renameFocused: Bool
@@ -38,6 +43,7 @@ struct ContentView: View {
     private enum DetailPane: Hashable {
         case metrics
         case processes
+        case network
         case terminal
     }
 
@@ -74,7 +80,7 @@ struct ContentView: View {
                     .clipped()
                 SidebarResizeHandle(width: $sidebarWidth)
                 detailStack
-                    .frame(minWidth: 620)
+                    .frame(minWidth: 680)
             }
             .navigationTitle(workspace == .inspect ? "巡查" : (selected?.displayName ?? "anny"))
             .toolbar {
@@ -127,6 +133,8 @@ struct ContentView: View {
                 if connectionChanged, selectedID == host.id {
                     metrics = nil
                     processSnapshot = nil
+                    networkSnapshot = nil
+                    probeResults = []
                 }
             }
             .environmentObject(store)
@@ -135,6 +143,8 @@ struct ContentView: View {
             Button("搜索") {
                 if workspace == .machine && detailPane == .processes {
                     processSearchFocused = true
+                } else if workspace == .machine && detailPane == .network {
+                    networkProbeFocused = true
                 } else {
                     searchFocused = true
                 }
@@ -158,12 +168,17 @@ struct ContentView: View {
         .onChange(of: selectedID) { _, _ in
             searchFocused = false
             processSearchFocused = false
+            networkProbeFocused = false
             liveRefresh = false
             stopLiveLoop()
             metrics = nil
             processSnapshot = nil
+            networkSnapshot = nil
+            probeResults = []
             loading = false
             processesLoading = false
+            networkLoading = false
+            probing = false
             killingPID = nil
         }
         .onChange(of: liveRefresh) { _, _ in
@@ -172,6 +187,9 @@ struct ContentView: View {
         .onChange(of: detailPane) { _, pane in
             if pane == .processes {
                 ensureProcesses()
+            }
+            if pane == .network {
+                ensureNetwork()
             }
             syncLiveLoop()
         }
@@ -545,6 +563,18 @@ struct ContentView: View {
                 )
                 .opacity(detailPane == .processes ? 1 : 0)
                 .allowsHitTesting(detailPane == .processes)
+                NetworkPane(
+                    hostID: host.id,
+                    snapshot: networkSnapshot,
+                    probes: probeResults,
+                    loading: networkLoading,
+                    probing: probing,
+                    probeFocused: $networkProbeFocused,
+                    onRefresh: refreshNetwork,
+                    onProbe: probeNetwork
+                )
+                .opacity(detailPane == .network ? 1 : 0)
+                .allowsHitTesting(detailPane == .network)
             } else {
                 emptySelection
             }
@@ -589,76 +619,106 @@ struct ContentView: View {
     @ViewBuilder
     private func hostHeader(_ host: WatchedHost) -> some View {
         let state = sessionState(host.id)
-        HStack(alignment: .center, spacing: 14) {
-            AnnySymbol(name: AnnyIcon.host, font: .title2)
-                .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
+                AnnySymbol(name: AnnyIcon.host, font: .title2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, height: 36)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(host.displayName)
-                    .font(.title2.weight(.semibold))
-                if !host.note.isEmpty {
-                    Text(verbatim: host.hostname)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Label {
-                    Text(verbatim: host.endpointLabel)
-                        .font(.subheadline.monospaced())
-                } icon: {
-                    AnnySymbol(name: AnnyIcon.ssh, font: .subheadline)
-                }
-                .foregroundStyle(.secondary)
-                .labelStyle(.titleAndIcon)
-                if let ip = metrics?.publicIP, !ip.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(host.displayName)
+                        .font(.title2.weight(.semibold))
+                    if !host.note.isEmpty {
+                        Text(verbatim: host.hostname)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                     Label {
-                        Text(verbatim: ip)
+                        Text(verbatim: host.endpointLabel)
                             .font(.subheadline.monospaced())
-                            .textSelection(.enabled)
                     } icon: {
-                        AnnySymbol(name: AnnyIcon.network, font: .subheadline)
+                        AnnySymbol(name: AnnyIcon.ssh, font: .subheadline)
                     }
                     .foregroundStyle(.secondary)
                     .labelStyle(.titleAndIcon)
-                    .help("外网出口")
-                }
-            }
-
-            Spacer(minLength: 12)
-
-            Picker("面板", selection: $detailPane) {
-                Text("资源").tag(DetailPane.metrics)
-                Text("进程").tag(DetailPane.processes)
-                Text("终端").tag(DetailPane.terminal)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 216)
-            .help("查看资源、进程或终端")
-
-            AnnyGlassCluster(spacing: 10) {
-                HStack(spacing: 10) {
-                    Text("动态")
-                        .font(.subheadline)
+                    if let ip = metrics?.publicIP, !ip.isEmpty {
+                        Label {
+                            Text(verbatim: ip)
+                                .font(.subheadline.monospaced())
+                                .textSelection(.enabled)
+                        } icon: {
+                            AnnySymbol(name: AnnyIcon.network, font: .subheadline)
+                        }
                         .foregroundStyle(.secondary)
-                    Toggle("动态", isOn: $liveRefresh)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .labelsHidden()
-                        .help(detailPane == .processes
-                              ? "打开后持续刷新进程 CPU 和内存"
-                              : "打开后持续刷新 CPU、内存和 Swap")
-                    Button("刷新", systemImage: AnnyIcon.refresh) { refreshCurrentPane() }
-                        .disabled(refreshDisabled)
-                        .help(detailPane == .processes
-                              ? "读取进程列表"
-                              : "读取系统、CPU、内存、Swap 和磁盘")
-                        .annyGlass()
-                    sessionButton(host, state: state)
+                        .labelStyle(.titleAndIcon)
+                        .help("外网出口")
+                    }
                 }
+
+                Spacer(minLength: 12)
+
+                AnnyGlassCluster(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Text("动态")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Toggle("动态", isOn: $liveRefresh)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                            .help(liveHelp)
+                        Button("刷新", systemImage: AnnyIcon.refresh) { refreshCurrentPane() }
+                            .fixedSize()
+                            .disabled(refreshDisabled)
+                            .help(refreshHelp)
+                            .annyGlass()
+                        sessionButton(host, state: state)
+                    }
+                }
+            }
+
+            HStack {
+                Spacer(minLength: 0)
+                paneSwitcher
+                Spacer(minLength: 0)
             }
         }
         .cardBackground()
+    }
+
+    private var paneSwitcher: some View {
+        HStack(spacing: 3) {
+            paneTab("资源", .metrics)
+            paneTab("进程", .processes)
+            paneTab("网络", .network)
+            paneTab("终端", .terminal)
+        }
+        .padding(4)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .help("查看资源、进程、网络或终端")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("面板")
+    }
+
+    private func paneTab(_ title: String, _ pane: DetailPane) -> some View {
+        Button {
+            detailPane = pane
+        } label: {
+            Text(title)
+                .font(.body.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .frame(minWidth: 78, minHeight: 30)
+                .padding(.horizontal, 12)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            if detailPane == pane {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.12))
+            }
+        }
+        .foregroundStyle(detailPane == pane ? Color.primary : Color.secondary)
     }
 
     @ViewBuilder
@@ -666,15 +726,18 @@ struct ContentView: View {
         switch state {
         case .idle:
             Button("连接", systemImage: AnnyIcon.terminal) { openTerminal(host) }
+                .fixedSize()
                 .keyboardShortcut("t", modifiers: [.command])
                 .annyGlass(prominent: true)
         case .connected:
             Button("断开", systemImage: AnnyIcon.disconnect, role: .destructive) { disconnect(host) }
+                .fixedSize()
                 .keyboardShortcut("d", modifiers: [.command])
                 .help("只断开本窗口 SSH，名单还在")
                 .annyGlass()
         case .ended:
             Button("重新连接", systemImage: AnnyIcon.reconnect) { reconnect(host) }
+                .fixedSize()
                 .keyboardShortcut("t", modifiers: [.command])
                 .annyGlass(prominent: true)
         }
@@ -972,6 +1035,79 @@ struct ContentView: View {
         }
     }
 
+    private func ensureNetwork() {
+        guard networkSnapshot == nil, !networkLoading else { return }
+        refreshNetwork()
+    }
+
+    private func refreshNetwork() {
+        guard let host = selected else { return }
+        networkLoading = true
+        let snapshot = host
+        Task.detached {
+            let result: NetworkSnapshot
+            do {
+                var s = try SSHService.fetchNetwork(snapshot)
+                s.error = s.nics.isEmpty ? (s.error ?? "没有读到网卡") : nil
+                result = s
+            } catch {
+                result = NetworkSnapshot(fetchedAt: Date(), error: error.localizedDescription)
+            }
+            await MainActor.run {
+                if selectedID == snapshot.id {
+                    networkSnapshot = result
+                    networkLoading = false
+                }
+            }
+        }
+    }
+
+    private func probeNetwork(_ target: String) {
+        guard let host = selected else { return }
+        probing = true
+        let snapshot = host
+        Task.detached {
+            let result: Result<[ProbeRow], Error> = Result {
+                try SSHService.probeNetwork(snapshot, target: target)
+            }
+            await MainActor.run {
+                guard selectedID == snapshot.id else { return }
+                probing = false
+                switch result {
+                case .success(let rows):
+                    probeResults = rows
+                    if rows.isEmpty {
+                        actionError = "没有探活结果"
+                    }
+                case .failure(let error):
+                    actionError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private var liveHelp: String {
+        switch detailPane {
+        case .processes:
+            return "打开后持续刷新进程 CPU 和内存"
+        case .network:
+            return "网络页不自动刷新，用「刷新」或「探活」"
+        default:
+            return "打开后持续刷新 CPU、内存和 Swap"
+        }
+    }
+
+    private var refreshHelp: String {
+        switch detailPane {
+        case .processes:
+            return "读取进程列表"
+        case .network:
+            return "读取网卡、网关、DNS、Docker 和 Kubernetes"
+        default:
+            return "读取系统、CPU、内存、Swap 和磁盘"
+        }
+    }
+
     private var liveLoopActive: Bool {
         guard liveRefresh, workspace == .machine, selected != nil else { return false }
         switch detailPane {
@@ -979,7 +1115,7 @@ struct ContentView: View {
             return !loading
         case .processes:
             return !processesLoading
-        case .terminal:
+        case .network, .terminal:
             return false
         }
     }
@@ -990,6 +1126,8 @@ struct ContentView: View {
             return loading
         case .processes:
             return processesLoading
+        case .network:
+            return networkLoading
         }
     }
 
@@ -999,6 +1137,8 @@ struct ContentView: View {
             refresh()
         case .processes:
             refreshProcesses()
+        case .network:
+            refreshNetwork()
         }
     }
 
@@ -1030,7 +1170,7 @@ struct ContentView: View {
                     return .processes(host, processSnapshot)
                 case .metrics:
                     return .metrics(host, metrics?.cpuTicks)
-                case .terminal:
+                case .network, .terminal:
                     return nil
                 }
             }
