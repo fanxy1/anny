@@ -85,6 +85,12 @@ final class InspectStore: ObservableObject {
         runTask = Task { await run(targets) }
     }
 
+    func restart(_ host: WatchedHost) {
+        guard !isRunning else { return }
+        guard runIDs.contains(host.id) else { return }
+        runTask = Task { await runOne(host) }
+    }
+
     func cancel() {
         runTask?.cancel()
     }
@@ -118,6 +124,17 @@ final class InspectStore: ObservableObject {
             }
         }
 
+        runningIDs = []
+        save()
+    }
+
+    private func runOne(_ host: WatchedHost) async {
+        runningIDs = [host.id]
+        records.removeValue(forKey: host.id)
+        let record = await InspectStore.fetch(host)
+        if !Task.isCancelled {
+            records[host.id] = record
+        }
         runningIDs = []
         save()
     }
