@@ -148,6 +148,14 @@ struct DiskRow: Identifiable, Hashable {
     var mount: String
 }
 
+struct UnusedDiskRow: Identifiable, Hashable {
+    var id: String { name }
+    var name: String
+    var size: Int64
+    var model: String
+    var status: String
+}
+
 struct LiveMetrics: Hashable {
     var cpuPercent: Double?
     var cpuTicks: [Int64]
@@ -171,6 +179,7 @@ struct HostMetrics: Hashable {
     var swapTotal: Int64? = nil
     var swapFree: Int64? = nil
     var disks: [DiskRow] = []
+    var unusedDisks: [UnusedDiskRow] = []
     var osPretty: String? = nil
     var osName: String? = nil
     var osVersion: String? = nil

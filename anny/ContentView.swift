@@ -890,7 +890,7 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    if !m.disks.isEmpty {
+                    if !m.disks.isEmpty || !m.unusedDisks.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack(spacing: 8) {
                                 AnnySymbol(name: AnnyIcon.disk)
@@ -901,16 +901,32 @@ struct ContentView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            Table(m.disks) {
-                                TableColumn("挂载") { Text(verbatim: $0.mount).font(.body.monospaced()) }
-                                TableColumn("容量") { Text(verbatim: byteText($0.size)) }
-                                TableColumn("已用") { row in
-                                    Text(verbatim: "\(row.percent)  \(byteText(row.used))")
-                                        .foregroundStyle(Theme.usageColor(Theme.diskLevel(row.percent)))
+                            if !m.disks.isEmpty {
+                                Table(m.disks) {
+                                    TableColumn("挂载") { Text(verbatim: $0.mount).font(.body.monospaced()) }
+                                    TableColumn("容量") { Text(verbatim: byteText($0.size)) }
+                                    TableColumn("已用") { row in
+                                        Text(verbatim: "\(row.percent)  \(byteText(row.used))")
+                                            .foregroundStyle(Theme.usageColor(Theme.diskLevel(row.percent)))
+                                    }
+                                    TableColumn("可用") { Text(verbatim: byteText($0.avail)) }
                                 }
-                                TableColumn("可用") { Text(verbatim: byteText($0.avail)) }
+                                .frame(minHeight: 200)
                             }
-                            .frame(minHeight: 200)
+                            if !m.unusedDisks.isEmpty {
+                                Text("未分配")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Table(m.unusedDisks) {
+                                    TableColumn("设备") { Text(verbatim: "/dev/\($0.name)").font(.body.monospaced()) }
+                                    TableColumn("容量") { Text(verbatim: byteText($0.size)) }
+                                    TableColumn("型号") { row in
+                                        Text(verbatim: row.model.isEmpty ? "—" : row.model)
+                                    }
+                                    TableColumn("状态") { Text(verbatim: $0.status) }
+                                }
+                                .frame(minHeight: 120)
+                            }
                         }
                         .cardBackground()
                     }

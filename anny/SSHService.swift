@@ -223,6 +223,8 @@ enum SSHService {
         grep '^cpu ' /proc/stat
         echo '===DF==='
         df -B1 -P -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null
+        echo '===LSBLK==='
+        lsblk -b -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,PKNAME,MODEL 2>/dev/null || lsblk -b -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,PKNAME 2>/dev/null || lsblk -b -P -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null
         echo '===OS==='
         if [ -r /etc/os-release ]; then
           grep -E '^(NAME|PRETTY_NAME|VERSION|VERSION_ID|ID)=' /etc/os-release
@@ -417,6 +419,7 @@ enum SSHService {
         var cpu1: [Int64] = []
         var cpu2: [Int64] = []
         var disks: [DiskRow] = []
+        var lsblkLines: [String] = []
         var osPretty: String?
         var osName: String?
         var osVersion: String?
@@ -458,6 +461,10 @@ enum SSHService {
                         mount: cols[5]
                     )
                 )
+            case "===LSBLK===":
+                if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    lsblkLines.append(line)
+                }
             case "===OS===":
                 guard let (key, value) = osReleaseField(line) else { break }
                 switch key {
@@ -491,6 +498,7 @@ enum SSHService {
             swapTotal: swapTotal,
             swapFree: swapFree,
             disks: disks,
+            unusedDisks: unusedDisks(from: lsblkLines),
             osPretty: osPretty,
             osName: osName,
             osVersion: osVersion ?? osVersionId,
@@ -798,5 +806,164 @@ enum SSHService {
 
     private static func cpuFields(_ line: String) -> [Int64] {
         line.split(whereSeparator: \.isWhitespace).dropFirst().compactMap { Int64($0) }
+    }
+
+    private static let claimedFSTypes: Set<String> = [
+        "LVM2_member", "linux_raid_member", "crypto_LUKS", "swap",
+        "zfs_member", "VMFS", "ceph_bluestore", "bcache",
+    ]
+
+    private static let claimedBlkTypes: Set<String> = [
+        "lvm", "crypt", "mpath", "md",
+    ]
+
+    static func parseLsblkPairs(_ line: String) -> [String: String] {
+        var result: [String: String] = [:]
+        var remaining = Substring(line)
+        while !remaining.isEmpty {
+            while remaining.first == " " {
+                remaining.removeFirst()
+            }
+            guard let eq = remaining.firstIndex(of: "=") else { break }
+            let key = String(remaining[..<eq])
+            remaining = remaining[remaining.index(after: eq)...]
+            guard remaining.first == "\"" else { break }
+            remaining.removeFirst()
+            var value = ""
+            while !remaining.isEmpty {
+                let ch = remaining.removeFirst()
+                if ch == "\\" {
+                    if !remaining.isEmpty {
+                        value.append(remaining.removeFirst())
+                    }
+                    continue
+                }
+                if ch == "\"" { break }
+                value.append(ch)
+            }
+            if !key.isEmpty {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    static func unusedDisks(from lines: [String]) -> [UnusedDiskRow] {
+        struct Blk {
+            var name: String
+            var size: Int64
+            var type: String
+            var fstype: String
+            var mount: String
+            var pkname: String
+            var model: String
+        }
+
+        var devices: [Blk] = []
+        var byName: [String: Blk] = [:]
+        for line in lines {
+            let pairs = parseLsblkPairs(line)
+            guard let name = pairs["NAME"], !name.isEmpty else { continue }
+            let type = pairs["TYPE"] ?? ""
+            let rawPk = pairs["PKNAME"] ?? ""
+            let pkname: String
+            if !rawPk.isEmpty {
+                pkname = rawPk
+            } else if type != "disk" {
+                pkname = inferLsblkParent(name) ?? ""
+            } else {
+                pkname = ""
+            }
+            let blk = Blk(
+                name: name,
+                size: Int64(pairs["SIZE"] ?? "") ?? 0,
+                type: type,
+                fstype: pairs["FSTYPE"] ?? "",
+                mount: pairs["MOUNTPOINT"] ?? "",
+                pkname: pkname,
+                model: (pairs["MODEL"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            devices.append(blk)
+            byName[name] = blk
+        }
+
+        func diskName(for device: Blk) -> String? {
+            var current = device
+            var seen = Set<String>()
+            for _ in 0..<8 {
+                if current.type == "disk" { return current.name }
+                let pk = current.pkname
+                if pk.isEmpty { return nil }
+                if !seen.insert(pk).inserted { return nil }
+                if let parent = byName[pk] {
+                    current = parent
+                } else {
+                    return pk
+                }
+            }
+            return nil
+        }
+
+        func isClaimed(_ device: Blk) -> Bool {
+            if !device.mount.isEmpty { return true }
+            if claimedFSTypes.contains(device.fstype) { return true }
+            if claimedBlkTypes.contains(device.type) || device.type.hasPrefix("raid") { return true }
+            return false
+        }
+
+        var used = Set<String>()
+        for device in devices {
+            guard isClaimed(device), let disk = diskName(for: device) else { continue }
+            used.insert(disk)
+        }
+
+        return devices
+            .filter { device in
+                guard device.type == "disk", device.size > 0 else { return false }
+                if shouldSkipBlk(name: device.name, type: device.type) { return false }
+                return !used.contains(device.name)
+            }
+            .map { device in
+                let hasKids = devices.contains { $0.pkname == device.name }
+                let hasFS = !device.fstype.isEmpty || devices.contains { $0.pkname == device.name && !$0.fstype.isEmpty }
+                return UnusedDiskRow(
+                    name: device.name,
+                    size: device.size,
+                    model: device.model,
+                    status: (!hasKids && !hasFS) ? "无分区" : "未挂载"
+                )
+            }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private static func shouldSkipBlk(name: String, type: String) -> Bool {
+        if ["loop", "rom", "ram"].contains(type) { return true }
+        return name.hasPrefix("loop")
+            || name.hasPrefix("ram")
+            || name.hasPrefix("zram")
+            || name.hasPrefix("sr")
+    }
+
+    static func inferLsblkParent(_ name: String) -> String? {
+        if let range = name.range(of: #"p[0-9]+$"#, options: .regularExpression) {
+            let parent = String(name[..<range.lowerBound])
+            return parent.isEmpty ? nil : parent
+        }
+        for prefix in ["xvd", "sd", "vd", "hd"] where name.hasPrefix(prefix) {
+            var end = name.endIndex
+            while end > name.startIndex {
+                let prev = name.index(before: end)
+                if name[prev].isNumber {
+                    end = prev
+                } else {
+                    break
+                }
+            }
+            let parent = String(name[..<end])
+            if parent != name, parent.count >= prefix.count {
+                return parent
+            }
+        }
+        return nil
     }
 }
