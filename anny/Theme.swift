@@ -12,6 +12,7 @@ enum AnnyIcon {
     static let host = "server.rack"
     static let group = "folder"
     static let search = "magnifyingglass"
+    static let sidebar = "sidebar.leading"
     static let add = "plus"
     static let edit = "pencil"
     static let remove = "minus"
