@@ -149,6 +149,14 @@ struct InspectView: View {
                             tableSelection = row.id
                             onSelect(row.id)
                         }
+                        .contextMenu {
+                            Button("重新巡查") {
+                                tableSelection = row.id
+                                onSelect(row.id)
+                                inspect.restart(row.host)
+                            }
+                            .disabled(inspect.isRunning)
+                        }
                         Divider().opacity(0.35)
                     }
                 }

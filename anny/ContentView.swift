@@ -25,6 +25,10 @@ struct ContentView: View {
     @State private var terminalGenerations: [UUID: Int] = [:]
     @State private var terminalRunning: [UUID: Bool] = [:]
     @State private var sidebarWidth: CGFloat = 220
+    @AppStorage("anny.sidebarHidden") private var sidebarHidden = false
+    @State private var metricsByHost: [UUID: HostMetrics] = [:]
+    @State private var processesByHost: [UUID: ProcessSnapshot] = [:]
+    @State private var networkByHost: [UUID: NetworkSnapshot] = [:]
     @State private var hostSearch = ""
     @FocusState private var searchFocused: Bool
     @FocusState private var processSearchFocused: Bool
@@ -75,10 +79,12 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             HStack(spacing: 0) {
-                sidebar
-                    .frame(width: sidebarWidth)
-                    .clipped()
-                SidebarResizeHandle(width: $sidebarWidth)
+                if !sidebarHidden {
+                    sidebar
+                        .frame(width: sidebarWidth)
+                        .clipped()
+                    SidebarResizeHandle(width: $sidebarWidth)
+                }
                 detailStack
                     .frame(minWidth: 680)
             }
@@ -95,6 +101,13 @@ struct ContentView: View {
                     .help("切换单机查看和批量巡查")
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        sidebarHidden.toggle()
+                    } label: {
+                        Label(sidebarHidden ? "显示侧栏" : "隐藏侧栏", systemImage: AnnyIcon.sidebar)
+                    }
+                    .help(sidebarHidden ? "显示侧栏" : "隐藏侧栏")
+
                     Button { showAdd = true } label: {
                         Label("添加", systemImage: AnnyIcon.add)
                     }
@@ -130,11 +143,14 @@ struct ContentView: View {
         }
         .sheet(item: $editingHost) { host in
             EditHostSheet(host: host) { connectionChanged in
-                if connectionChanged, selectedID == host.id {
-                    metrics = nil
-                    processSnapshot = nil
-                    networkSnapshot = nil
-                    probeResults = []
+                if connectionChanged {
+                    forgetCaches(host.id)
+                    if selectedID == host.id {
+                        metrics = nil
+                        processSnapshot = nil
+                        networkSnapshot = nil
+                        probeResults = []
+                    }
                 }
             }
             .environmentObject(store)
@@ -151,6 +167,9 @@ struct ContentView: View {
             }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
+            Button("切换侧栏") { sidebarHidden.toggle() }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+                .hidden()
         }
         .alert("出错", isPresented: Binding(
             get: { actionError != nil },
@@ -165,21 +184,27 @@ struct ContentView: View {
                 selectedID = store.hosts.first?.id
             }
         }
-        .onChange(of: selectedID) { _, _ in
+        .onChange(of: selectedID) { _, newID in
             searchFocused = false
             processSearchFocused = false
             networkProbeFocused = false
             liveRefresh = false
             stopLiveLoop()
-            metrics = nil
-            processSnapshot = nil
-            networkSnapshot = nil
+            metrics = newID.flatMap { metricsByHost[$0] }
+            processSnapshot = newID.flatMap { processesByHost[$0] }
+            networkSnapshot = newID.flatMap { networkByHost[$0] }
             probeResults = []
             loading = false
             processesLoading = false
             networkLoading = false
             probing = false
             killingPID = nil
+            if detailPane == .processes {
+                ensureProcesses()
+            }
+            if detailPane == .network {
+                ensureNetwork()
+            }
         }
         .onChange(of: liveRefresh) { _, _ in
             syncLiveLoop()
@@ -252,15 +277,14 @@ struct ContentView: View {
     }
 
     private var sidebarList: some View {
-        List(selection: $selectedID) {
-            ForEach(sidebarItems) { item in
-                sidebarRow(item)
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(sidebarItems) { item in
+                    sidebarRow(item)
+                }
             }
+            .padding(.top, 2)
         }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, 18)
-        .contentMargins(.top, 2, for: .scrollContent)
         .overlay {
             if store.hosts.isEmpty, store.groups.isEmpty {
                 ContentUnavailableView {
@@ -289,32 +313,45 @@ struct ContentView: View {
         Text("没有匹配")
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
-            .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 8))
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-            .selectionDisabled()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
     }
 
     private func groupListRow(_ bucket: HostBucket) -> some View {
         groupHeader(bucket)
-            .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 8))
-            .listRowSeparator(.hidden)
-            .listRowBackground(dropTarget == bucket.id ? Color.accentColor.opacity(0.14) : Color.clear)
-            .selectionDisabled()
+            .padding(.leading, 6)
+            .padding(.trailing, 8)
+            .background(dropTarget == bucket.id ? Color.accentColor.opacity(0.14) : Color.clear)
     }
 
     private func hostListRow(bucketID: String, host: WatchedHost) -> some View {
-        hostRow(host)
-            .tag(host.id)
-            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-            .listRowSeparator(.hidden)
-            .listRowBackground(dropTarget == "host-\(host.id.uuidString)" ? Color.accentColor.opacity(0.14) : Color.clear)
-            .background {
-                HostListDoubleClick {
-                    openTerminal(host)
+        let dropping = dropTarget == "host-\(host.id.uuidString)"
+        let highlighted = workspace == .machine && selectedID == host.id
+        return hostRow(host)
+            .padding(.horizontal, 8)
+            .background(
+                highlighted ? Color.accentColor.opacity(0.16)
+                    : dropping ? Color.accentColor.opacity(0.14)
+                    : Color.clear
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if workspace == .inspect {
+                    inspect.setChecked(host.id, !inspect.isChecked(host.id))
+                } else {
+                    selectedID = host.id
                     searchFocused = false
                 }
-                .allowsHitTesting(false)
+            }
+            .background {
+                if workspace == .machine {
+                    HostListDoubleClick {
+                        openTerminal(host)
+                        searchFocused = false
+                    }
+                    .allowsHitTesting(false)
+                }
             }
             .contextMenu { hostMenu(host) }
             .draggable(host.id.uuidString)
@@ -370,14 +407,16 @@ struct ContentView: View {
         let renaming = bucket.groupID != nil && renamingGroupID == bucket.groupID
         HStack(spacing: 5) {
             let ids = bucket.hosts.map(\.id)
-            Toggle("", isOn: Binding(
-                get: { !ids.isEmpty && ids.allSatisfy { inspect.checked.contains($0) } },
-                set: { inspect.setChecked(ids, $0) }
-            ))
-            .toggleStyle(.checkbox)
-            .controlSize(.mini)
-            .labelsHidden()
-            .disabled(ids.isEmpty)
+            if workspace == .inspect {
+                Toggle("", isOn: Binding(
+                    get: { !ids.isEmpty && ids.allSatisfy { inspect.checked.contains($0) } },
+                    set: { inspect.setChecked(ids, $0) }
+                ))
+                .toggleStyle(.checkbox)
+                .controlSize(.mini)
+                .labelsHidden()
+                .disabled(ids.isEmpty)
+            }
             Image(systemName: "chevron.right")
                 .font(.system(size: 8, weight: .bold))
                 .foregroundStyle(.tertiary)
@@ -465,13 +504,16 @@ struct ContentView: View {
     private func hostRow(_ host: WatchedHost) -> some View {
         let state = sessionState(host.id)
         HStack(spacing: 6) {
-            Toggle("", isOn: Binding(
-                get: { inspect.isChecked(host.id) },
-                set: { inspect.setChecked(host.id, $0) }
-            ))
-            .toggleStyle(.checkbox)
-            .controlSize(.mini)
-            .labelsHidden()
+            if workspace == .inspect {
+                Toggle("", isOn: Binding(
+                    get: { inspect.isChecked(host.id) },
+                    set: { inspect.setChecked(host.id, $0) }
+                ))
+                .toggleStyle(.checkbox)
+                .controlSize(.mini)
+                .labelsHidden()
+                .allowsHitTesting(false)
+            }
             Image(systemName: AnnyIcon.host)
                 .font(.system(size: 10))
                 .foregroundStyle(state == .connected ? Color.green : Color.secondary.opacity(0.7))
@@ -958,6 +1000,45 @@ struct ContentView: View {
         return .idle
     }
 
+    private func publishMetrics(_ value: HostMetrics?, hostID: UUID) {
+        if let value {
+            metricsByHost[hostID] = value
+        } else {
+            metricsByHost.removeValue(forKey: hostID)
+        }
+        if selectedID == hostID {
+            metrics = value
+        }
+    }
+
+    private func publishProcesses(_ value: ProcessSnapshot?, hostID: UUID) {
+        if let value {
+            processesByHost[hostID] = value
+        } else {
+            processesByHost.removeValue(forKey: hostID)
+        }
+        if selectedID == hostID {
+            processSnapshot = value
+        }
+    }
+
+    private func publishNetwork(_ value: NetworkSnapshot?, hostID: UUID) {
+        if let value {
+            networkByHost[hostID] = value
+        } else {
+            networkByHost.removeValue(forKey: hostID)
+        }
+        if selectedID == hostID {
+            networkSnapshot = value
+        }
+    }
+
+    private func forgetCaches(_ id: UUID) {
+        metricsByHost.removeValue(forKey: id)
+        processesByHost.removeValue(forKey: id)
+        networkByHost.removeValue(forKey: id)
+    }
+
     private func refresh() {
         guard let host = selected else { return }
         loading = true
@@ -976,7 +1057,7 @@ struct ContentView: View {
             }
             await MainActor.run {
                 if selectedID == snapshot.id {
-                    metrics = result
+                    publishMetrics(result, hostID: snapshot.id)
                     loading = false
                 }
             }
@@ -1004,7 +1085,7 @@ struct ContentView: View {
             }
             await MainActor.run {
                 if selectedID == snapshot.id {
-                    processSnapshot = result
+                    publishProcesses(result, hostID: snapshot.id)
                     processesLoading = false
                 }
             }
@@ -1055,7 +1136,7 @@ struct ContentView: View {
             }
             await MainActor.run {
                 if selectedID == snapshot.id {
-                    networkSnapshot = result
+                    publishNetwork(result, hostID: snapshot.id)
                     networkLoading = false
                 }
             }
@@ -1188,12 +1269,15 @@ struct ContentView: View {
                         guard !Task.isCancelled, selectedID == hostID, liveRefresh, detailPane == .metrics else { return }
                         switch result {
                         case .success(let live):
-                            applyLive(live, previousTicks: previousTicks)
+                            applyLive(live, previousTicks: previousTicks, hostID: hostID)
                         case .failure(let error):
                             if metrics == nil {
-                                metrics = HostMetrics(
-                                    fetchedAt: Date(),
-                                    error: error.localizedDescription
+                                publishMetrics(
+                                    HostMetrics(
+                                        fetchedAt: Date(),
+                                        error: error.localizedDescription
+                                    ),
+                                    hostID: hostID
                                 )
                             }
                         }
@@ -1206,12 +1290,15 @@ struct ContentView: View {
                         guard !Task.isCancelled, selectedID == hostID, liveRefresh, detailPane == .processes else { return }
                         switch result {
                         case .success(let snapshot):
-                            processSnapshot = snapshot
+                            publishProcesses(snapshot, hostID: hostID)
                         case .failure(let error):
                             if processSnapshot == nil {
-                                processSnapshot = ProcessSnapshot(
-                                    fetchedAt: Date(),
-                                    error: error.localizedDescription
+                                publishProcesses(
+                                    ProcessSnapshot(
+                                        fetchedAt: Date(),
+                                        error: error.localizedDescription
+                                    ),
+                                    hostID: hostID
                                 )
                             }
                         }
@@ -1227,7 +1314,7 @@ struct ContentView: View {
         }
     }
 
-    private func applyLive(_ live: LiveMetrics, previousTicks: [Int64]?) {
+    private func applyLive(_ live: LiveMetrics, previousTicks: [Int64]?, hostID: UUID) {
         var m = metrics ?? HostMetrics(fetchedAt: Date())
         m.memTotal = live.memTotal ?? m.memTotal
         m.memAvailable = live.memAvailable ?? m.memAvailable
@@ -1251,7 +1338,7 @@ struct ContentView: View {
             m.cpuTicks = live.cpuTicks
         }
         m.error = nil
-        metrics = m
+        publishMetrics(m, hostID: hostID)
     }
 
     private func hasSystemInfo(_ m: HostMetrics) -> Bool {
@@ -1290,10 +1377,10 @@ struct ContentView: View {
     private func remove(_ host: WatchedHost) {
         closeTerminal(host.id)
         inspect.forget(host.id)
+        forgetCaches(host.id)
         store.removeFromWatchlist(host)
         if selectedID == host.id {
             selectedID = store.hosts.first?.id
-            metrics = nil
         }
     }
 
