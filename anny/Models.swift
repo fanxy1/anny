@@ -322,6 +322,54 @@ struct ProbeRow: Identifiable, Hashable {
     }
 }
 
+enum DNSPickVerdict: String, Hashable {
+    case best
+    case goodEnough
+    case switchDNS
+    case allFailed
+}
+
+struct DNSPickRow: Identifiable, Hashable {
+    var rank: Int
+    var name: String
+    var address: String
+    var protocolName: String
+    var isSystem: Bool
+    var avgLatencyMs: Double?
+    var successRate: Double
+    var successes: Int
+    var total: Int
+    var score: Double
+
+    var id: String { "\(protocolName)-\(address)-\(name)-\(isSystem)" }
+
+    var latencyText: String {
+        guard let avgLatencyMs else { return "—" }
+        return String(format: "%.2f ms", avgLatencyMs)
+    }
+
+    var successText: String {
+        String(format: "%.1f%%  (%d/%d)", successRate * 100, successes, total)
+    }
+
+    var scoreText: String {
+        String(format: "%.1f", score)
+    }
+}
+
+struct DNSPickSnapshot: Hashable {
+    var rows: [DNSPickRow] = []
+    var top: [DNSPickRow] = []
+    var verdict: DNSPickVerdict? = nil
+    var shouldSwitch: Bool = false
+    var isInternalDNS: Bool = false
+    var systemAddress: String? = nil
+    var systemRank: Int? = nil
+    var latencyGapMs: Double? = nil
+    var error: String? = nil
+    var fetchedAt: Date
+}
+
 struct NetworkSnapshot: Hashable {
     var nics: [NicRow] = []
     var gateway: String? = nil
@@ -333,6 +381,18 @@ struct NetworkSnapshot: Hashable {
     var k8sAvailable: Bool = false
     var fetchedAt: Date
     var error: String? = nil
+
+    var hostIPv4: String? {
+        guard let dev = gatewayDev, !dev.isEmpty else { return nil }
+        guard let nic = nics.first(where: { $0.name == dev }) else { return nil }
+        guard let raw = nic.ipv4.first else { return nil }
+        return Self.stripCIDR(raw)
+    }
+
+    static func stripCIDR(_ addr: String) -> String {
+        guard let slash = addr.firstIndex(of: "/") else { return addr }
+        return String(addr[..<slash])
+    }
 }
 
 enum InspectSeverity: String, Codable {

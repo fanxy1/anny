@@ -35,6 +35,10 @@ enum SSHService {
         return parseProbeRows(try runSSH(host, script: probeScript(target: cleaned), timeout: 16))
     }
 
+    static func pickDNS(_ host: WatchedHost) throws -> DNSPickSnapshot {
+        DNSPick.parse(try runSSH(host, script: dnsPickScript, timeout: 45))
+    }
+
     static func sanitizedProbeTarget(_ raw: String) -> String? {
         let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, t.count <= 253 else { return nil }
@@ -208,6 +212,138 @@ enum SSHService {
         wait
         """
     }
+
+    /// UDP A queries from the remote host. Score and ranking happen on the Mac.
+    private static let dnsPickScript = """
+        echo '===DNSPICK==='
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo 'error\t这台机器没有 python3，装上后再测'
+          exit 0
+        fi
+        python3 - <<'PY'
+        import random, socket, struct, threading, time
+
+        DOMAINS = ['baidu.com', 'qq.com', 'taobao.com', 'jd.com', 'google.com', 'github.com', 'apple.com', 'cloudflare.com']
+        QUERIES = 2
+        TIMEOUT = 1.5
+        STREAK = 5
+        CONC = 8
+        SERVERS = [
+            ('AliDNS 1', '223.5.5.5'),
+            ('AliDNS 2', '223.6.6.6'),
+            ('DNSPod 1', '119.28.28.28'),
+            ('DNSPod 2', '119.29.29.29'),
+            ('114DNS', '114.114.114.114'),
+            ('BaiduDNS', '180.76.76.76'),
+            ('Bytedance', '180.184.1.1'),
+            ('Google', '8.8.8.8'),
+            ('Cloudflare', '1.1.1.1'),
+            ('Quad9', '9.9.9.9'),
+            ('OpenDNS', '208.67.222.222'),
+        ]
+
+        def ipv4(addr):
+            parts = addr.split('.')
+            if len(parts) != 4:
+                return False
+            try:
+                return all(0 <= int(p) <= 255 for p in parts)
+            except ValueError:
+                return False
+
+        def system_dns():
+            try:
+                with open('/etc/resolv.conf') as f:
+                    for line in f:
+                        cols = line.split()
+                        if len(cols) >= 2 and cols[0] == 'nameserver' and ipv4(cols[1]):
+                            return cols[1]
+            except OSError:
+                return None
+            return None
+
+        def encode_name(name):
+            out = bytearray()
+            for label in name.split('.'):
+                raw = label.encode('ascii')
+                out.append(len(raw))
+                out.extend(raw)
+            out.append(0)
+            return bytes(out)
+
+        def query(server, domain, timeout):
+            tid = random.randint(0, 65535)
+            pkt = struct.pack('!HHHHHH', tid, 0x0100, 1, 0, 0, 0) + encode_name(domain) + struct.pack('!HH', 1, 1)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.settimeout(timeout)
+                t0 = time.monotonic()
+                sock.sendto(pkt, (server, 53))
+                data, _ = sock.recvfrom(512)
+                dt = time.monotonic() - t0
+            finally:
+                sock.close()
+            if len(data) < 12:
+                raise OSError('short')
+            rtid, flags = struct.unpack('!HH', data[:4])
+            if rtid != tid:
+                raise OSError('tid')
+            if flags & 0xF not in (0, 3):
+                raise OSError('rcode')
+            return dt
+
+        def bench(name, addr, is_system):
+            streak = 0
+            if DOMAINS:
+                try:
+                    query(addr, DOMAINS[0], TIMEOUT)
+                except Exception:
+                    streak = 1
+            times = []
+            successes = 0
+            total = 0
+            unreachable = False
+            for domain in DOMAINS:
+                for _ in range(QUERIES):
+                    total += 1
+                    if unreachable:
+                        continue
+                    try:
+                        times.append(query(addr, domain, TIMEOUT))
+                        successes += 1
+                        streak = 0
+                    except Exception:
+                        streak += 1
+                        if streak >= STREAK:
+                            unreachable = True
+            avg = ('%.3f' % (sum(times) / len(times) * 1000.0)) if times else ''
+            flag = '1' if is_system else '0'
+            return '%s\\t%s\\tudp\\t%s\\t%s\\t%d\\t%d' % (name, addr, flag, avg, successes, total)
+
+        jobs = [(n, a, False) for n, a in SERVERS]
+        sys_addr = system_dns()
+        if sys_addr:
+            jobs.append(('当前 DNS', sys_addr, True))
+
+        lock = threading.Lock()
+        sem = threading.Semaphore(CONC)
+
+        def run(job):
+            name, addr, is_system = job
+            with sem:
+                line = bench(name, addr, is_system)
+            with lock:
+                print(line, flush=True)
+
+        threads = []
+        for job in jobs:
+            t = threading.Thread(target=run, args=(job,))
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        PY
+        """
 
     private static var metricsScript: String {
         """

@@ -4,11 +4,14 @@ struct NetworkPane: View {
     let hostID: UUID
     var snapshot: NetworkSnapshot?
     var probes: [ProbeRow]
+    var pick: DNSPickSnapshot?
     var loading: Bool
     var probing: Bool
+    var picking: Bool
     var probeFocused: FocusState<Bool>.Binding
     var onRefresh: () -> Void
     var onProbe: (String) -> Void
+    var onPick: () -> Void
 
     @State private var target = ""
 
@@ -16,14 +19,20 @@ struct NetworkPane: View {
         VStack(alignment: .leading, spacing: 12) {
             toolbar
             if loading && snapshot == nil {
+                if pick != nil || picking { dnsPickCard }
                 loadingCard
             } else if let error = snapshot?.error, snapshot?.nics.isEmpty != false {
+                if pick != nil || picking { dnsPickCard }
                 errorCard(error)
             } else if snapshot == nil {
+                if pick != nil || picking { dnsPickCard }
                 emptyCard
             } else if let snapshot {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
+                        if pick != nil || picking {
+                            dnsPickCard
+                        }
                         if !probes.isEmpty || probing {
                             probeCard
                         }
@@ -70,9 +79,14 @@ struct NetworkPane: View {
             .frame(maxWidth: 280)
 
             Button("探活") { onProbe(target) }
-                .disabled(probing || loading)
+                .disabled(probing || picking || loading)
                 .help(probeHelp)
                 .annyGlass(prominent: true)
+
+            Button("测 DNS") { onPick() }
+                .disabled(probing || picking)
+                .help(pickHelp)
+                .annyGlass()
 
             Text(statusLine)
                 .font(.subheadline)
@@ -110,10 +124,104 @@ struct NetworkPane: View {
         ContentUnavailableView {
             Label("尚未读取网络", systemImage: AnnyIcon.network)
         } description: {
-            Text("切到这一页会自动读取网卡。输入 IP 或域名后点「探活」。")
+            Text("切到这一页会自动读取网卡。输入 IP 或域名后点「探活」，或点「测 DNS」对比公共解析器。")
         }
         .symbolRenderingMode(.hierarchical)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .cardBackground()
+    }
+
+    private var dnsPickCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                AnnySymbol(name: AnnyIcon.dnsPick)
+                Text("测 DNS")
+                    .font(.headline)
+                Spacer()
+                if picking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if let pick, !pick.rows.isEmpty {
+                    Text("\(pick.rows.count) 台")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if picking, pick == nil {
+                Text("正在从这台机器查询常用域名，给公共 DNS 和当前 DNS 打分…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if let pick {
+                Text(DNSPick.summary(of: pick))
+                    .font(.subheadline)
+                    .foregroundStyle(pick.shouldSwitch ? Color.orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !pick.top.isEmpty {
+                    Text("推荐")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                    ForEach(pick.top) { row in
+                        HStack(spacing: 10) {
+                            Text("#\(row.rank)")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28, alignment: .leading)
+                            Text(row.isSystem ? "\(row.name)（当前）" : row.name)
+                                .frame(width: 120, alignment: .leading)
+                            Text(row.address)
+                                .font(.body.monospaced())
+                                .textSelection(.enabled)
+                                .frame(width: 130, alignment: .leading)
+                            Spacer(minLength: 0)
+                            Text(row.latencyText)
+                                .font(.body.monospacedDigit())
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                if !pick.rows.isEmpty {
+                    headerRow {
+                        header("#", width: 28)
+                        header("DNS", width: 120)
+                        header("地址", width: 130)
+                        header("延迟", width: 88)
+                        header("成功率", width: 110)
+                        header("得分", width: nil)
+                    }
+                    Divider().opacity(0.55)
+                    ForEach(pick.rows) { row in
+                        HStack(spacing: 8) {
+                            Text("\(row.rank)")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28, alignment: .leading)
+                            Text(row.isSystem ? "\(row.name)（当前）" : row.name)
+                                .lineLimit(1)
+                                .frame(width: 120, alignment: .leading)
+                            Text(row.address)
+                                .font(.body.monospaced())
+                                .textSelection(.enabled)
+                                .lineLimit(1)
+                                .frame(width: 130, alignment: .leading)
+                            Text(row.latencyText)
+                                .font(.body.monospacedDigit())
+                                .frame(width: 88, alignment: .leading)
+                            Text(row.successText)
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(row.successRate < 1 ? Color.red : Theme.usageColor(10))
+                                .frame(width: 110, alignment: .leading)
+                            Text(row.scoreText)
+                                .font(.body.monospacedDigit())
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.vertical, 4)
+                        .background(row.isSystem ? Color.accentColor.opacity(0.08) : Color.clear)
+                        Divider().opacity(0.35)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .cardBackground()
     }
 
@@ -178,6 +286,12 @@ struct NetworkPane: View {
                     return "\(gw)  ·  \(dev)"
                 }
                 return gw
+            } ?? "—")
+            summaryLine("本机", snapshot.hostIPv4.map { ip in
+                if let dev = snapshot.gatewayDev, !dev.isEmpty {
+                    return "\(ip)  ·  \(dev)"
+                }
+                return ip
             } ?? "—")
             summaryLine("DNS", snapshot.dns.isEmpty ? "—" : snapshot.dns.joined(separator: "  "))
             summaryLine("Docker", snapshot.dockerAvailable ? "已安装 · \(snapshot.docker.count) 个网络" : "未检测到")
@@ -305,9 +419,10 @@ struct NetworkPane: View {
     }
 
     private var statusLine: String {
+        if picking { return "测 DNS 中…" }
         if probing { return "探活中…" }
         if loading { return "正在读取…" }
-        guard let snapshot else { return "输入目标后探活" }
+        guard let snapshot else { return "输入目标后探活，或测 DNS" }
         if snapshot.dockerAvailable || snapshot.k8sAvailable {
             return "探活会同时打 Docker / K8s"
         }
@@ -316,6 +431,10 @@ struct NetworkPane: View {
 
     private var probeHelp: String {
         "从这台机器 ping 目标；有 Docker 或 K8s 时一并探测它们的网络"
+    }
+
+    private var pickHelp: String {
+        "从这台机器并发查询常用域名，给公共 DNS 打分并对比当前 DNS。不会改系统设置。"
     }
 
     private var probeSummary: String {

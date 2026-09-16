@@ -10,10 +10,12 @@ struct ContentView: View {
     @State private var processSnapshot: ProcessSnapshot?
     @State private var networkSnapshot: NetworkSnapshot?
     @State private var probeResults: [ProbeRow] = []
+    @State private var dnsPick: DNSPickSnapshot?
     @State private var loading = false
     @State private var processesLoading = false
     @State private var networkLoading = false
     @State private var probing = false
+    @State private var dnsPicking = false
     @State private var killingPID: Int?
     @State private var liveRefresh = false
     @State private var liveTask: Task<Void, Never>?
@@ -150,6 +152,7 @@ struct ContentView: View {
                         processSnapshot = nil
                         networkSnapshot = nil
                         probeResults = []
+                        dnsPick = nil
                     }
                 }
             }
@@ -194,10 +197,12 @@ struct ContentView: View {
             processSnapshot = newID.flatMap { processesByHost[$0] }
             networkSnapshot = newID.flatMap { networkByHost[$0] }
             probeResults = []
+            dnsPick = nil
             loading = false
             processesLoading = false
             networkLoading = false
             probing = false
+            dnsPicking = false
             killingPID = nil
             if detailPane == .processes {
                 ensureProcesses()
@@ -609,11 +614,14 @@ struct ContentView: View {
                     hostID: host.id,
                     snapshot: networkSnapshot,
                     probes: probeResults,
+                    pick: dnsPick,
                     loading: networkLoading,
                     probing: probing,
+                    picking: dnsPicking,
                     probeFocused: $networkProbeFocused,
                     onRefresh: refreshNetwork,
-                    onProbe: probeNetwork
+                    onProbe: probeNetwork,
+                    onPick: pickDNS
                 )
                 .opacity(detailPane == .network ? 1 : 0)
                 .allowsHitTesting(detailPane == .network)
@@ -1183,12 +1191,34 @@ struct ContentView: View {
         }
     }
 
+    private func pickDNS() {
+        guard let host = selected else { return }
+        dnsPicking = true
+        dnsPick = nil
+        let snapshot = host
+        Task.detached {
+            let result: Result<DNSPickSnapshot, Error> = Result {
+                try SSHService.pickDNS(snapshot)
+            }
+            await MainActor.run {
+                guard selectedID == snapshot.id else { return }
+                dnsPicking = false
+                switch result {
+                case .success(let pick):
+                    dnsPick = pick
+                case .failure(let error):
+                    actionError = error.localizedDescription
+                }
+            }
+        }
+    }
+
     private var liveHelp: String {
         switch detailPane {
         case .processes:
             return "打开后持续刷新进程 CPU 和内存"
         case .network:
-            return "网络页不自动刷新，用「刷新」或「探活」"
+            return "网络页不自动刷新，用「刷新」、「探活」或「测 DNS」"
         default:
             return "打开后持续刷新 CPU、内存和 Swap"
         }

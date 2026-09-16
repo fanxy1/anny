@@ -41,6 +41,7 @@ enum AnnyIcon {
     static let pin = "pin"
     static let pinFill = "pin.fill"
     static let probe = "dot.radiowaves.left.and.right"
+    static let dnsPick = "switch.2"
 }
 
 enum Theme {

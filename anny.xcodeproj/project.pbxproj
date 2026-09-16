@@ -22,6 +22,7 @@
 		A10000000000000000000035 /* InspectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000034 /* InspectView.swift */; };
 		A10000000000000000000038 /* ProcessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000036 /* ProcessView.swift */; };
 		A10000000000000000000040 /* NetworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000039 /* NetworkView.swift */; };
+		A1000000000000000000003B /* DNSPick.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003A /* DNSPick.swift */; };
 		A10000000000000000000029 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* Assets.xcassets */; };
 		A10000000000000000000032 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000031 /* SwiftTerm */; };
 /* End PBXBuildFile section */
@@ -42,6 +43,7 @@
 		A10000000000000000000034 /* InspectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectView.swift; sourceTree = "<group>"; };
 		A10000000000000000000036 /* ProcessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessView.swift; sourceTree = "<group>"; };
 		A10000000000000000000039 /* NetworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkView.swift; sourceTree = "<group>"; };
+		A1000000000000000000003A /* DNSPick.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DNSPick.swift; sourceTree = "<group>"; };
 		A10000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000000000000000000000A /* anny.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = anny.entitlements; sourceTree = "<group>"; };
 		A1000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -87,6 +89,7 @@
 				A10000000000000000000034 /* InspectView.swift */,
 				A10000000000000000000036 /* ProcessView.swift */,
 				A10000000000000000000039 /* NetworkView.swift */,
+				A1000000000000000000003A /* DNSPick.swift */,
 				A10000000000000000000005 /* ProcessRun.swift */,
 				A10000000000000000000006 /* TailscaleService.swift */,
 				A10000000000000000000007 /* SSHService.swift */,
@@ -185,6 +188,7 @@
 				A10000000000000000000035 /* InspectView.swift in Sources */,
 				A10000000000000000000038 /* ProcessView.swift in Sources */,
 				A10000000000000000000040 /* NetworkView.swift in Sources */,
+				A1000000000000000000003B /* DNSPick.swift in Sources */,
 				A10000000000000000000025 /* ProcessRun.swift in Sources */,
 				A10000000000000000000026 /* TailscaleService.swift in Sources */,
 				A10000000000000000000027 /* SSHService.swift in Sources */,
