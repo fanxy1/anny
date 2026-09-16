@@ -39,6 +39,23 @@ enum SSHService {
         DNSPick.parse(try runSSH(host, script: dnsPickScript, timeout: 45))
     }
 
+    static func fetchAuthKeys(_ host: WatchedHost) throws -> AuthKeysSnapshot {
+        AuthKeys.parseFile(try runSSH(host, script: authKeysReadScript, timeout: 10))
+    }
+
+    static func addAuthKey(_ host: WatchedHost, line: String) throws {
+        let payload = AuthKeys.encodeFile([line])
+        guard let data = payload.data(using: .utf8) else {
+            throw NSError(domain: "anny", code: 6, userInfo: [NSLocalizedDescriptionKey: "公钥无法编码"])
+        }
+        _ = try runSSH(host, script: authKeysAppendScript, timeout: 10, stdin: data)
+    }
+
+    static func replaceAuthKeys(_ host: WatchedHost, contents: String) throws {
+        let data = contents.data(using: .utf8) ?? Data()
+        _ = try runSSH(host, script: authKeysWriteScript, timeout: 10, stdin: data)
+    }
+
     static func sanitizedProbeTarget(_ raw: String) -> String? {
         let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, t.count <= 253 else { return nil }
@@ -405,7 +422,37 @@ enum SSHService {
         """
     }
 
-    private static func runSSH(_ host: WatchedHost, script: String, timeout: TimeInterval) throws -> String {
+    private static let authKeysReadScript = """
+        if [ -r "$HOME/.ssh/authorized_keys" ]; then
+          cat "$HOME/.ssh/authorized_keys"
+        elif [ -e "$HOME/.ssh/authorized_keys" ]; then
+          echo '读不了 authorized_keys' >&2
+          exit 1
+        fi
+        """
+
+    private static let authKeysAppendScript = """
+        umask 077
+        mkdir -p "$HOME/.ssh" || exit 1
+        chmod 700 "$HOME/.ssh" || exit 1
+        touch "$HOME/.ssh/authorized_keys" || exit 1
+        chmod 600 "$HOME/.ssh/authorized_keys" || exit 1
+        f="$HOME/.ssh/authorized_keys"
+        if [ -s "$f" ] && [ "$(tail -c 1 "$f" | wc -l)" -eq 0 ]; then
+          printf '\\n' >> "$f" || exit 1
+        fi
+        cat >> "$f"
+        """
+
+    private static let authKeysWriteScript = """
+        umask 077
+        mkdir -p "$HOME/.ssh" || exit 1
+        chmod 700 "$HOME/.ssh" || exit 1
+        cat > "$HOME/.ssh/authorized_keys" || exit 1
+        chmod 600 "$HOME/.ssh/authorized_keys" || exit 1
+        """
+
+    private static func runSSH(_ host: WatchedHost, script: String, timeout: TimeInterval, stdin: Data? = nil) throws -> String {
         let hasPassword = HostSecretStore.hasPassword(for: host.id)
         var arguments = [
             "-o", "ConnectTimeout=8",
@@ -418,7 +465,8 @@ enum SSHService {
             "/usr/bin/ssh",
             arguments: arguments,
             environment: SSHAuth.processEnvironment(hostID: host.id),
-            timeout: timeout
+            timeout: timeout,
+            stdin: stdin
         )
 
         guard result.status == 0 else {

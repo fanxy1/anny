@@ -6,7 +6,8 @@ enum ProcessRun {
         _ launchPath: String,
         arguments: [String],
         environment: [String: String]? = nil,
-        timeout: TimeInterval = 20
+        timeout: TimeInterval = 20,
+        stdin: Data? = nil
     ) throws -> (stdout: String, stderr: String, status: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
@@ -15,9 +16,14 @@ enum ProcessRun {
 
         let out = Pipe()
         let err = Pipe()
+        let input: Pipe? = stdin == nil ? nil : Pipe()
         process.standardOutput = out
         process.standardError = err
-        process.standardInput = FileHandle.nullDevice
+        if let input {
+            process.standardInput = input
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
 
         let collected = CollectedOutput()
         out.fileHandleForReading.readabilityHandler = { handle in
@@ -32,6 +38,12 @@ enum ProcessRun {
 
         do {
             try process.run()
+            if let input, let stdin {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    input.fileHandleForWriting.write(stdin)
+                    try? input.fileHandleForWriting.close()
+                }
+            }
         } catch {
             out.fileHandleForReading.readabilityHandler = nil
             err.fileHandleForReading.readabilityHandler = nil

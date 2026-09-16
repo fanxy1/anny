@@ -475,3 +475,22 @@ struct InspectFile: Hashable, Codable {
         min(16, max(1, n))
     }
 }
+
+struct AuthKeyRow: Identifiable, Hashable {
+    var lineIndex: Int
+    var keyType: String
+    var typeLabel: String
+    var comment: String
+    var fingerprint: String
+    var raw: String
+    var valid: Bool
+
+    var id: Int { lineIndex }
+}
+
+struct AuthKeysSnapshot: Hashable {
+    var rawLines: [String] = []
+    var rows: [AuthKeyRow] = []
+    var fetchedAt: Date
+    var error: String? = nil
+}

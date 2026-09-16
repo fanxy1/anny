@@ -9,11 +9,14 @@ struct ContentView: View {
     @State private var metrics: HostMetrics?
     @State private var processSnapshot: ProcessSnapshot?
     @State private var networkSnapshot: NetworkSnapshot?
+    @State private var keysSnapshot: AuthKeysSnapshot?
     @State private var probeResults: [ProbeRow] = []
     @State private var dnsPick: DNSPickSnapshot?
     @State private var loading = false
     @State private var processesLoading = false
     @State private var networkLoading = false
+    @State private var keysLoading = false
+    @State private var keysMutating = false
     @State private var probing = false
     @State private var dnsPicking = false
     @State private var killingPID: Int?
@@ -31,6 +34,7 @@ struct ContentView: View {
     @State private var metricsByHost: [UUID: HostMetrics] = [:]
     @State private var processesByHost: [UUID: ProcessSnapshot] = [:]
     @State private var networkByHost: [UUID: NetworkSnapshot] = [:]
+    @State private var keysByHost: [UUID: AuthKeysSnapshot] = [:]
     @State private var hostSearch = ""
     @FocusState private var searchFocused: Bool
     @FocusState private var processSearchFocused: Bool
@@ -50,6 +54,7 @@ struct ContentView: View {
         case metrics
         case processes
         case network
+        case keys
         case terminal
     }
 
@@ -151,6 +156,7 @@ struct ContentView: View {
                         metrics = nil
                         processSnapshot = nil
                         networkSnapshot = nil
+                        keysSnapshot = nil
                         probeResults = []
                         dnsPick = nil
                     }
@@ -196,11 +202,14 @@ struct ContentView: View {
             metrics = newID.flatMap { metricsByHost[$0] }
             processSnapshot = newID.flatMap { processesByHost[$0] }
             networkSnapshot = newID.flatMap { networkByHost[$0] }
+            keysSnapshot = newID.flatMap { keysByHost[$0] }
             probeResults = []
             dnsPick = nil
             loading = false
             processesLoading = false
             networkLoading = false
+            keysLoading = false
+            keysMutating = false
             probing = false
             dnsPicking = false
             killingPID = nil
@@ -209,6 +218,9 @@ struct ContentView: View {
             }
             if detailPane == .network {
                 ensureNetwork()
+            }
+            if detailPane == .keys {
+                ensureKeys()
             }
         }
         .onChange(of: liveRefresh) { _, _ in
@@ -220,6 +232,9 @@ struct ContentView: View {
             }
             if pane == .network {
                 ensureNetwork()
+            }
+            if pane == .keys {
+                ensureKeys()
             }
             syncLiveLoop()
         }
@@ -625,6 +640,16 @@ struct ContentView: View {
                 )
                 .opacity(detailPane == .network ? 1 : 0)
                 .allowsHitTesting(detailPane == .network)
+                KeysPane(
+                    hostID: host.id,
+                    snapshot: keysSnapshot,
+                    loading: keysLoading,
+                    mutating: keysMutating,
+                    onAdd: addAuthKey,
+                    onDelete: deleteAuthKeys
+                )
+                .opacity(detailPane == .keys ? 1 : 0)
+                .allowsHitTesting(detailPane == .keys)
             } else {
                 emptySelection
             }
@@ -741,11 +766,12 @@ struct ContentView: View {
             paneTab("资源", .metrics)
             paneTab("进程", .processes)
             paneTab("网络", .network)
+            paneTab("密钥", .keys)
             paneTab("终端", .terminal)
         }
         .padding(4)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .help("查看资源、进程、网络或终端")
+        .help("查看资源、进程、网络、密钥或终端")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("面板")
     }
@@ -757,8 +783,8 @@ struct ContentView: View {
             Text(title)
                 .font(.body.weight(.semibold))
                 .multilineTextAlignment(.center)
-                .frame(minWidth: 78, minHeight: 30)
-                .padding(.horizontal, 12)
+                .frame(minWidth: 64, minHeight: 30)
+                .padding(.horizontal, 10)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1057,10 +1083,22 @@ struct ContentView: View {
         }
     }
 
+    private func publishKeys(_ value: AuthKeysSnapshot?, hostID: UUID) {
+        if let value {
+            keysByHost[hostID] = value
+        } else {
+            keysByHost.removeValue(forKey: hostID)
+        }
+        if selectedID == hostID {
+            keysSnapshot = value
+        }
+    }
+
     private func forgetCaches(_ id: UUID) {
         metricsByHost.removeValue(forKey: id)
         processesByHost.removeValue(forKey: id)
         networkByHost.removeValue(forKey: id)
+        keysByHost.removeValue(forKey: id)
     }
 
     private func refresh() {
@@ -1145,6 +1183,72 @@ struct ContentView: View {
         refreshNetwork()
     }
 
+    private func ensureKeys() {
+        guard keysSnapshot == nil, !keysLoading else { return }
+        refreshKeys()
+    }
+
+    private func refreshKeys() {
+        guard let host = selected else { return }
+        keysLoading = true
+        let snapshot = host
+        Task.detached {
+            let result: AuthKeysSnapshot
+            do {
+                var s = try SSHService.fetchAuthKeys(snapshot)
+                s.error = nil
+                result = s
+            } catch {
+                result = AuthKeysSnapshot(fetchedAt: Date(), error: error.localizedDescription)
+            }
+            await MainActor.run {
+                if selectedID == snapshot.id {
+                    publishKeys(result, hostID: snapshot.id)
+                    keysLoading = false
+                }
+            }
+        }
+    }
+
+    private func addAuthKey(_ line: String) async throws {
+        guard let host = selected else {
+            throw NSError(domain: "anny", code: 7, userInfo: [NSLocalizedDescriptionKey: "没有选中机器"])
+        }
+        keysMutating = true
+        let snapshot = host
+        do {
+            let result = try await Task.detached {
+                try SSHService.addAuthKey(snapshot, line: line)
+                return try SSHService.fetchAuthKeys(snapshot)
+            }.value
+            publishKeys(result, hostID: snapshot.id)
+            keysMutating = false
+        } catch {
+            keysMutating = false
+            throw error
+        }
+    }
+
+    private func deleteAuthKeys(_ indices: Set<Int>) async throws {
+        guard let host = selected, let current = keysSnapshot else {
+            throw NSError(domain: "anny", code: 7, userInfo: [NSLocalizedDescriptionKey: "没有选中机器"])
+        }
+        keysMutating = true
+        let contents = AuthKeys.removingLines(current, indices: indices)
+        let snapshot = host
+        do {
+            let result = try await Task.detached {
+                try SSHService.replaceAuthKeys(snapshot, contents: contents)
+                return try SSHService.fetchAuthKeys(snapshot)
+            }.value
+            publishKeys(result, hostID: snapshot.id)
+            keysMutating = false
+        } catch {
+            keysMutating = false
+            throw error
+        }
+    }
+
     private func refreshNetwork() {
         guard let host = selected else { return }
         networkLoading = true
@@ -1219,6 +1323,8 @@ struct ContentView: View {
             return "打开后持续刷新进程 CPU 和内存"
         case .network:
             return "网络页不自动刷新，用「刷新」、「探活」或「测 DNS」"
+        case .keys:
+            return "密钥页不自动刷新，用「刷新」重新读取"
         default:
             return "打开后持续刷新 CPU、内存和 Swap"
         }
@@ -1230,6 +1336,8 @@ struct ContentView: View {
             return "读取进程列表"
         case .network:
             return "读取网卡、网关、DNS、Docker 和 Kubernetes"
+        case .keys:
+            return "读取当前账户的 authorized_keys"
         default:
             return "读取系统、CPU、内存、Swap 和磁盘"
         }
@@ -1242,7 +1350,7 @@ struct ContentView: View {
             return !loading
         case .processes:
             return !processesLoading
-        case .network, .terminal:
+        case .network, .terminal, .keys:
             return false
         }
     }
@@ -1255,6 +1363,8 @@ struct ContentView: View {
             return processesLoading
         case .network:
             return networkLoading
+        case .keys:
+            return keysLoading || keysMutating
         }
     }
 
@@ -1266,6 +1376,8 @@ struct ContentView: View {
             refreshProcesses()
         case .network:
             refreshNetwork()
+        case .keys:
+            refreshKeys()
         }
     }
 
@@ -1297,7 +1409,7 @@ struct ContentView: View {
                     return .processes(host, processSnapshot)
                 case .metrics:
                     return .metrics(host, metrics?.cpuTicks)
-                case .network, .terminal:
+                case .network, .terminal, .keys:
                     return nil
                 }
             }

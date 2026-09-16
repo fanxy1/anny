@@ -33,6 +33,7 @@ enum AnnyIcon {
     static let ssh = "cable.connector"
     static let user = "person"
     static let password = "key"
+    static let keys = "key.horizontal"
     static let system = "desktopcomputer"
     static let distro = "square.stack"
     static let version = "number"
